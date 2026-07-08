@@ -10,7 +10,13 @@ from typing import Any
 from aiu.artifact_store import ArtifactStore
 from aiu.auth import AuthStore
 from aiu.config import ProviderName
+from aiu.course_memory import (
+    build_lecture_context_packet,
+    lecture_context_prompt,
+    record_lecture_memory,
+)
 from aiu.lecture_quality import minimum_transcript_words, transcript_word_count
+from aiu.logging import ProgressCallback, content_snippet, emit_progress
 from aiu.models import CourseBlueprint, CourseManifest, LectureSession, VRHandoffCue
 from aiu.project import update_manifest_artifacts
 from aiu.providers import GenerationRequest, ProviderAdapter, ProviderError, provider_for_name
@@ -45,56 +51,249 @@ class LectureGenerationContext:
     provider: ProviderAdapter | None
 
 
-def generate_lecture_artifacts(course_root: str | Path, *, force: bool = False) -> list[str]:
+def generate_lecture_artifacts(
+    course_root: str | Path,
+    *,
+    force: bool = False,
+    progress: ProgressCallback | None = None,
+) -> list[str]:
     """Generate scheduled lecture Markdown, JSON, and VR cue artifacts."""
 
     store = ArtifactStore(course_root)
+    _require_lecture_inputs(store)
+    lecture_items = _lecture_items(store)
+    artifacts = [artifact for item in lecture_items for artifact in _lecture_artifact_paths(item)]
+    if not force and stage_is_complete(course_root, "lectures", artifacts):
+        emit_progress(
+            progress,
+            "lectures",
+            "Reusing completed lecture stage",
+            detail=f"{len(lecture_items)} lecture(s), {len(artifacts)} artifact(s).",
+        )
+        return artifacts
+
+    return _write_lecture_items(
+        course_root,
+        lecture_items,
+        complete_stage_after=True,
+        force=force,
+        progress=progress,
+        regenerated=False,
+    )
+
+
+def generate_lecture_week(
+    course_root: str | Path,
+    *,
+    week: int,
+    force: bool = False,
+    progress: ProgressCallback | None = None,
+) -> list[str]:
+    """Generate scheduled lecture artifacts for one week without completing the whole stage."""
+
+    store = ArtifactStore(course_root)
+    _require_lecture_inputs(store)
+    items = [item for item in _lecture_items(store) if int(item["week"]) == week]
+    if not items:
+        raise LectureGenerationError(f"No lectures found for week {week}.")
+    return _write_lecture_items(
+        course_root,
+        items,
+        complete_stage_after=False,
+        force=force,
+        progress=progress,
+        regenerated=False,
+    )
+
+
+def expected_lecture_artifacts(course_root: str | Path) -> list[str]:
+    """Return the scheduled lecture, metadata, and cue artifacts for a course."""
+
+    store = ArtifactStore(course_root)
+    _require_lecture_inputs(store)
+    return [
+        artifact
+        for item in _lecture_items(store)
+        for artifact in _lecture_artifact_paths(item)
+    ]
+
+
+def complete_lecture_stage_if_ready(course_root: str | Path) -> list[str]:
+    """Mark the lecture stage complete when all expected lecture artifacts exist."""
+
+    store = ArtifactStore(course_root)
+    artifacts = expected_lecture_artifacts(course_root)
+    if all(store.course_path(artifact).exists() for artifact in artifacts):
+        complete_stage(course_root, "lectures", artifacts)
+    return artifacts
+
+
+def _require_lecture_inputs(store: ArtifactStore) -> None:
     schedule_path = store.course_path("schedule.json")
     approved_path = store.course_path("approved_course_blueprint.json")
     if not schedule_path.exists() or not approved_path.exists():
         raise LectureGenerationError("Cannot generate lectures before planning and approval.")
 
-    schedule: dict[str, Any] = store.read_json("schedule.json")
-    lecture_items = [item for item in schedule.get("items", []) if item.get("type") == "lecture"]
-    artifacts = [artifact for item in lecture_items for artifact in _lecture_artifact_paths(item)]
-    if not force and stage_is_complete(course_root, "lectures", artifacts):
-        return artifacts
 
+def _lecture_items(store: ArtifactStore) -> list[dict[str, Any]]:
+    schedule: dict[str, Any] = store.read_json("schedule.json")
+    return [item for item in schedule.get("items", []) if item.get("type") == "lecture"]
+
+
+def _record_existing_lecture_memory(
+    store: ArtifactStore,
+    blueprint: CourseBlueprint,
+    json_path: str,
+    markdown_path: str,
+) -> None:
+    try:
+        lecture = LectureSession.model_validate(store.read_json(json_path))
+    except (OSError, ValueError):
+        return
+    record_lecture_memory(store.root, lecture, blueprint, artifact_ref=markdown_path)
+
+
+def _write_lecture_items(
+    course_root: str | Path,
+    items: list[dict[str, Any]],
+    *,
+    complete_stage_after: bool,
+    force: bool,
+    progress: ProgressCallback | None,
+    regenerated: bool,
+) -> list[str]:
+    store = ArtifactStore(course_root)
     start_stage(course_root, "lectures")
     blueprint = CourseBlueprint.model_validate(store.read_json("approved_course_blueprint.json"))
     source_refs = _source_refs(store)
     context = _lecture_generation_context(store, blueprint, source_refs)
-    manifest_entries: list[tuple[str, str, str]] = []
+    manifest_entries: list[tuple[str, str, str] | tuple[str, str, str, dict[str, Any]]] = []
     written_artifacts: list[str] = []
+    metadata = {"regenerated": True} if regenerated else {}
+    emit_progress(
+        progress,
+        "lectures",
+        "Generating lecture transcripts and VR cues"
+        if not regenerated
+        else "Regenerating selected lecture transcript(s)",
+        detail=(
+            f"{len(items)} lecture(s); provider "
+            f"{context.manifest.settings.provider.value}"
+        ),
+    )
 
-    for item in lecture_items:
-        lecture = _lecture_session(item, context)
+    for index, item in enumerate(items, start=1):
+        duration_hours = float(item.get("duration_hours", context.manifest.settings.lecture_hours))
         markdown_path, json_path, cue_path = _lecture_artifact_paths(item)
-        store.write_markdown(markdown_path, _lecture_markdown(lecture))
+        if (
+            not force
+            and not regenerated
+            and all(
+                store.course_path(path).exists()
+                for path in (markdown_path, json_path, cue_path)
+            )
+        ):
+            _record_existing_lecture_memory(store, blueprint, json_path, markdown_path)
+            written_artifacts.extend([markdown_path, json_path, cue_path])
+            emit_progress(
+                progress,
+                "lectures",
+                "Reusing existing lecture artifacts",
+                artifact=markdown_path,
+                current=index,
+                total=len(items),
+                detail=f"{json_path}; {cue_path}",
+            )
+            continue
+        emit_progress(
+            progress,
+            "lectures",
+            f"Composing Week {int(item['week'])}, Day {int(item['day'])}",
+            current=index,
+            total=len(items),
+            detail=(
+                f"{item['title']} target: "
+                f"{minimum_transcript_words(duration_hours)} transcript words"
+            ),
+        )
+        lecture = _lecture_session(item, context, progress=progress)
+        markdown = _lecture_markdown(lecture)
+        store.write_markdown(markdown_path, markdown)
         store.write_json(json_path, lecture)
         store.write_json(cue_path, {"cues": lecture.vr_cues, "lecture_id": lecture.lecture_id})
+        record_lecture_memory(course_root, lecture, blueprint, artifact_ref=markdown_path)
         for path in (markdown_path, json_path, cue_path):
             record_artifact_complete(course_root, "lectures", path)
             written_artifacts.append(path)
+        emit_progress(
+            progress,
+            "lectures",
+            "Rewrote lecture transcript" if regenerated else "Created lecture transcript",
+            artifact=markdown_path,
+            current=index,
+            total=len(items),
+            detail=(
+                f"{transcript_word_count(lecture.transcript)} words; "
+                f"{len(lecture.vr_cues)} VR cue(s)"
+            ),
+            snippet=content_snippet(lecture.transcript),
+        )
+        emit_progress(
+            progress,
+            "lectures",
+            "Created lecture metadata and VR cue files",
+            current=index,
+            total=len(items),
+            detail=f"{json_path}; {cue_path}",
+        )
         manifest_entries.extend(
             [
-                (f"{lecture.lecture_id}_markdown", "markdown", markdown_path),
-                (f"{lecture.lecture_id}_json", "json", json_path),
-                (f"{lecture.lecture_id}_vr_cues", "json", cue_path),
+                (f"{lecture.lecture_id}_markdown", "markdown", markdown_path, metadata),
+                (f"{lecture.lecture_id}_json", "json", json_path, metadata),
+                (f"{lecture.lecture_id}_vr_cues", "json", cue_path, metadata),
             ]
         )
 
     update_manifest_artifacts(course_root, manifest_entries)
-    complete_stage(course_root, "lectures", written_artifacts)
+    if complete_stage_after:
+        complete_stage(course_root, "lectures", expected_lecture_artifacts(course_root))
+    emit_progress(
+        progress,
+        "lectures",
+        "Completed lecture stage" if complete_stage_after else "Completed lecture batch",
+        detail=f"{len(written_artifacts)} artifact(s) written.",
+    )
     return written_artifacts
 
 
-def regenerate_lecture_artifact(course_root: str | Path, *, week: int, day: int) -> list[str]:
+def regenerate_lecture_artifact(
+    course_root: str | Path,
+    *,
+    week: int,
+    day: int,
+    progress: ProgressCallback | None = None,
+) -> list[str]:
     """Regenerate one lecture and its VR cue."""
 
     store = ArtifactStore(course_root)
     item = _find_lecture_item(store, week=week, day=day)
-    return _write_selected_lectures(course_root, [item], regenerated=True)
+    emit_progress(
+        progress,
+        "lectures",
+        "Regenerating from prior course memory only",
+        detail=(
+            "The target lecture and later lectures are excluded from the context packet; "
+            "regenerate a later range if downstream continuity must be refreshed."
+        ),
+    )
+    return _write_lecture_items(
+        course_root,
+        [item],
+        complete_stage_after=False,
+        force=True,
+        progress=progress,
+        regenerated=True,
+    )
 
 
 def generate_lecture_week_range(
@@ -102,6 +301,7 @@ def generate_lecture_week_range(
     *,
     start_week: int,
     end_week: int,
+    progress: ProgressCallback | None = None,
 ) -> list[str]:
     """Regenerate all lectures within an inclusive week range."""
 
@@ -114,45 +314,23 @@ def generate_lecture_week_range(
     ]
     if not items:
         raise LectureGenerationError(f"No lectures found for week range {start_week}-{end_week}.")
-    return _write_selected_lectures(course_root, items, regenerated=True)
-
-
-def _write_selected_lectures(
-    course_root: str | Path,
-    items: list[dict[str, Any]],
-    *,
-    regenerated: bool,
-) -> list[str]:
-    store = ArtifactStore(course_root)
-    if not store.course_path("approved_course_blueprint.json").exists():
-        raise LectureGenerationError("Cannot generate lectures before planning and approval.")
-    start_stage(course_root, "lectures")
-    blueprint = CourseBlueprint.model_validate(store.read_json("approved_course_blueprint.json"))
-    source_refs = _source_refs(store)
-    context = _lecture_generation_context(store, blueprint, source_refs)
-    written: list[str] = []
-    manifest_entries: list[tuple[str, str, str] | tuple[str, str, str, dict[str, Any]]] = []
-    metadata = {"regenerated": True} if regenerated else {}
-
-    for item in items:
-        lecture = _lecture_session(item, context)
-        markdown_path, json_path, cue_path = _lecture_artifact_paths(item)
-        store.write_markdown(markdown_path, _lecture_markdown(lecture))
-        store.write_json(json_path, lecture)
-        store.write_json(cue_path, {"cues": lecture.vr_cues, "lecture_id": lecture.lecture_id})
-        for path in (markdown_path, json_path, cue_path):
-            record_artifact_complete(course_root, "lectures", path)
-            written.append(path)
-        manifest_entries.extend(
-            [
-                (f"{lecture.lecture_id}_markdown", "markdown", markdown_path, metadata),
-                (f"{lecture.lecture_id}_json", "json", json_path, metadata),
-                (f"{lecture.lecture_id}_vr_cues", "json", cue_path, metadata),
-            ]
-        )
-    update_manifest_artifacts(course_root, manifest_entries)
-    complete_stage(course_root, "lectures", written)
-    return written
+    emit_progress(
+        progress,
+        "lectures",
+        "Regenerating range from prior course memory only",
+        detail=(
+            "Each regenerated lecture uses memory from earlier lectures only; "
+            "later lectures are not included in the context packet."
+        ),
+    )
+    return _write_lecture_items(
+        course_root,
+        items,
+        complete_stage_after=False,
+        force=True,
+        progress=progress,
+        regenerated=True,
+    )
 
 
 def _find_lecture_item(store: ArtifactStore, *, week: int, day: int) -> dict[str, Any]:
@@ -166,6 +344,8 @@ def _find_lecture_item(store: ArtifactStore, *, week: int, day: int) -> dict[str
 def _lecture_session(
     item: dict[str, Any],
     context: LectureGenerationContext,
+    *,
+    progress: ProgressCallback | None = None,
 ) -> LectureSession:
     lecture_id = str(item["id"])
     title = str(item["title"])
@@ -177,12 +357,23 @@ def _lecture_session(
         f"Connect week {week} material to the overall course plan.",
     ]
     minimum_words = minimum_transcript_words(duration_hours)
+    source_context = _source_context_for_prompt(context.store, item, context.blueprint, objectives)
+    context_packet = build_lecture_context_packet(
+        context.store.root,
+        context.blueprint,
+        item,
+        objectives,
+        source_context=source_context,
+    )
     transcript = _lecture_transcript(
         item=item,
         context=context,
+        context_packet=context_packet,
         objectives=objectives,
         minimum_words=minimum_words,
+        source_context=source_context,
         duration_hours=duration_hours,
+        progress=progress,
     )
     return LectureSession(
         lecture_id=lecture_id,
@@ -229,14 +420,18 @@ def _lecture_transcript(
     *,
     item: dict[str, Any],
     context: LectureGenerationContext,
+    context_packet: dict[str, Any],
     objectives: list[str],
     minimum_words: int,
+    source_context: str,
     duration_hours: float,
+    progress: ProgressCallback | None,
 ) -> str:
     if context.manifest.settings.provider == ProviderName.FAKE:
         return _fake_lecture_transcript(
             item=item,
             context=context,
+            context_packet=context_packet,
             objectives=objectives,
             minimum_words=minimum_words,
             duration_hours=duration_hours,
@@ -244,9 +439,12 @@ def _lecture_transcript(
     return _provider_lecture_transcript(
         item=item,
         context=context,
+        context_packet=context_packet,
         objectives=objectives,
         minimum_words=minimum_words,
+        source_context=source_context,
         duration_hours=duration_hours,
+        progress=progress,
     )
 
 
@@ -254,6 +452,7 @@ def _fake_lecture_transcript(
     *,
     item: dict[str, Any],
     context: LectureGenerationContext,
+    context_packet: dict[str, Any],
     objectives: list[str],
     minimum_words: int,
     duration_hours: float,
@@ -269,13 +468,15 @@ def _fake_lecture_transcript(
         if context.source_refs
         else "No local source packet is attached, so we will work from the course blueprint."
     )
+    continuity_note = _fake_continuity_note(context_packet)
     paragraphs = [
         (
             f"Welcome to {title}. This is Week {week}, Day {day}, and the goal is to treat "
             f"the session like a real {duration_hours:g} hour university lecture rather than "
             "a summary. I will build the argument slowly, pause for checks, use examples, "
             "and keep connecting each idea back to the course outcomes. "
-            f"{source_note} The lecture identifier for the generated course package is "
+            f"{source_note} {continuity_note} The lecture identifier for the generated "
+            "course package is "
             f"{lecture_id}, but in the room we will simply treat this as today's class."
         )
     ]
@@ -322,9 +523,12 @@ def _provider_lecture_transcript(
     *,
     item: dict[str, Any],
     context: LectureGenerationContext,
+    context_packet: dict[str, Any],
     objectives: list[str],
     minimum_words: int,
+    source_context: str,
     duration_hours: float,
+    progress: ProgressCallback | None,
 ) -> str:
     if context.provider is None:
         raise LectureGenerationError(
@@ -335,7 +539,6 @@ def _provider_lecture_transcript(
     chunks: list[str] = []
     word_total = 0
     max_calls = max(1, (minimum_words + 999) // 1000 + 6)
-    source_context = _source_context_for_prompt(context.store, item, context.blueprint, objectives)
 
     for call_number in range(1, max_calls + 1):
         remaining_words = minimum_words - word_total
@@ -349,6 +552,7 @@ def _provider_lecture_transcript(
             prompt=_provider_lecture_prompt(
                 item=item,
                 context=context,
+                context_packet=context_packet,
                 objectives=objectives,
                 source_context=source_context,
                 target_words=target_words,
@@ -375,6 +579,15 @@ def _provider_lecture_transcript(
             )
         chunks.append(piece)
         word_total += transcript_word_count(piece)
+        emit_progress(
+            progress,
+            "lectures",
+            f"Received provider transcript chunk {call_number}",
+            current=min(word_total, minimum_words),
+            total=minimum_words,
+            detail=f"{lecture_id}: {word_total} word(s) drafted so far",
+            snippet=content_snippet(piece),
+        )
 
     transcript = "\n\n".join(chunks).strip()
     if transcript_word_count(transcript) < minimum_words:
@@ -390,6 +603,7 @@ def _provider_lecture_prompt(
     *,
     item: dict[str, Any],
     context: LectureGenerationContext,
+    context_packet: dict[str, Any],
     objectives: list[str],
     source_context: str,
     target_words: int,
@@ -426,16 +640,47 @@ def _provider_lecture_prompt(
         f"{objectives_text}\n\n"
         "Week context:\n"
         f"{_week_context_for_prompt(context.blueprint, week)}\n\n"
+        "Course memory and continuity guidance:\n"
+        f"{lecture_context_prompt(context_packet)}\n\n"
         "Available local source excerpts:\n"
         f"{source_context}\n\n"
         "Requirements for this response:\n"
         "- Write professor speech only, as if delivered live in a lecture hall.\n"
         "- Include conceptual explanation, a concrete example, and a check for understanding.\n"
         "- Include natural transitions and occasional board-work or slide cues.\n"
+        "- Advance from prior lecture summaries instead of restarting the course.\n"
+        "- Briefly weave prior ideas forward, but do not re-teach extensively covered topics.\n"
+        "- Increase sophistication when recent labs, homework, quizzes, or exams checked "
+        "the topic.\n"
         "- Do not include markdown headings, bullet lists, JSON, or metadata.\n"
         "- Do not end the entire lecture unless the final minimum has been reached.\n\n"
         f"{continuation}"
     )
+
+
+def _fake_continuity_note(context_packet: dict[str, Any]) -> str:
+    recent = context_packet.get("recent_lectures", [])
+    events = context_packet.get("recent_events", [])
+    avoid = context_packet.get("avoid_repeating", [])
+    if not recent and not events and not avoid:
+        return "This is an early course session, so I will establish foundations carefully."
+
+    pieces: list[str] = []
+    if recent:
+        pieces.append(
+            f"We are building on prior lecture memory: {recent[-1].get('summary', '')}"
+        )
+    if events:
+        pieces.append(
+            "Recent labs or assessments have checked the basics, so we can move forward."
+        )
+    if avoid:
+        pieces.append(f"I will avoid re-teaching {_join_for_sentence(avoid[:3])} in full.")
+    return " ".join(pieces)
+
+
+def _join_for_sentence(values: list[Any]) -> str:
+    return ", ".join(str(value) for value in values)
 
 
 def _source_context_for_prompt(

@@ -129,6 +129,7 @@ aiu course create "Teach me compilers" --output ./courses/compilers --init-only
 aiu course plan ./courses/compilers
 aiu course approve ./courses/compilers
 aiu course generate ./courses/compilers --stage lectures
+aiu course resume ./courses/compilers --yes
 aiu course status ./courses/compilers
 ```
 
@@ -140,12 +141,23 @@ files are left in place.
 `aiu course create ... --yes` initializes the project, stores the prompt,
 ingests/extracts local context, plans, approves, generates
 syllabus/lectures/labs/assessments, validates, and writes logs to `logs/aiu.log`.
+Long-running create/generate commands also stream a loading view with stage
+progress, artifact paths, compact previews of newly generated course content,
+and periodic notes while the course package is being assembled.
+
+By default, each generated lecture targets two hours of professor speech. AIU
+enforces this as a minimum transcript length of 18,000 words per lecture
+(`2.0 hours * 60 minutes * 150 spoken words/minute`). The `--lecture-hours`
+option is available for explicit custom runs, and validation scales the required
+word count from that configured duration.
 
 ## Troubleshooting
 
 - Validation failures write `validation_report.json` and `warnings.md`.
 - `aiu course status <course>` reads `.aiu/state.json` to show completed,
   pending, failed, and skipped stages.
+- If course creation was interrupted, run `aiu course resume <course> --yes`
+  to continue from checkpointed artifacts and finish validation.
 - Re-run `aiu course generate <course>` to resume completed stages without
   rewriting them, or use `--force` for an intentional regeneration.
 - Use `aiu course regenerate <course> --artifact lecture:w08:d01` for targeted

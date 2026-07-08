@@ -10,6 +10,7 @@ from typing import Any
 from aiu.artifact_store import ArtifactStore
 from aiu.auth import AuthStore
 from aiu.config import CourseSettings, LabPolicy, ProviderName
+from aiu.logging import ProgressCallback, content_snippet, emit_progress
 from aiu.models import (
     AssessmentPlanEntry,
     AssessmentType,
@@ -27,7 +28,9 @@ class PlanningError(ValueError):
     """Raised when a course plan cannot be generated."""
 
 
-def plan_course(course_root: str | Path) -> CourseBlueprint:
+def plan_course(
+    course_root: str | Path, *, progress: ProgressCallback | None = None
+) -> CourseBlueprint:
     """Generate deterministic intent analysis, blueprint, and schedule artifacts."""
 
     store = ArtifactStore(course_root)
@@ -38,6 +41,13 @@ def plan_course(course_root: str | Path) -> CourseBlueprint:
         "schedule.json",
     ]
     if stage_is_complete(course_root, "blueprint", blueprint_artifacts):
+        emit_progress(
+            progress,
+            "blueprint",
+            "Reusing completed course blueprint",
+            artifact="course_blueprint.json",
+            detail="Planning artifacts already exist and passed checkpoint validation.",
+        )
         return CourseBlueprint.model_validate(store.read_json("course_blueprint.json"))
 
     manifest = CourseManifest.model_validate(store.read_json("manifest.json"))
@@ -45,6 +55,16 @@ def plan_course(course_root: str | Path) -> CourseBlueprint:
         raise PlanningError("Cannot plan a course before prompt.md is stored.")
 
     start_stage(course_root, "blueprint")
+    emit_progress(
+        progress,
+        "blueprint",
+        "Analyzing learning goal and course settings",
+        detail=(
+            f"{manifest.settings.weeks} weeks, "
+            f"{manifest.settings.lectures_per_week} lecture(s) per week, "
+            f"{manifest.settings.lab_policy.value} lab policy"
+        ),
+    )
     if os.environ.get("AIU_FAIL_STAGE") == "blueprint":
         fail_stage(course_root, "blueprint", "simulated blueprint failure")
         raise PlanningError("Simulated blueprint failure requested by AIU_FAIL_STAGE.")
@@ -52,7 +72,20 @@ def plan_course(course_root: str | Path) -> CourseBlueprint:
     prompt = store.course_path(manifest.prompt_ref).read_text(encoding="utf-8")
     settings = manifest.settings
     subject = _subject_from_prompt(prompt)
+    emit_progress(
+        progress,
+        "blueprint",
+        "Inferred course subject",
+        detail=f"Subject: {content_snippet(subject, max_chars=120)}",
+    )
     provider_plan_seed = _provider_plan_seed(prompt=prompt, settings=settings)
+    if provider_plan_seed:
+        emit_progress(
+            progress,
+            "blueprint",
+            "Provider returned curriculum planning guidance",
+            snippet=content_snippet(provider_plan_seed),
+        )
     intent = _intent_analysis(
         subject=subject,
         prompt=prompt,
@@ -66,6 +99,17 @@ def plan_course(course_root: str | Path) -> CourseBlueprint:
     store.write_json("course_blueprint.json", blueprint)
     store.write_markdown("course_blueprint.md", _blueprint_markdown(blueprint))
     store.write_json("schedule.json", schedule)
+    emit_progress(
+        progress,
+        "blueprint",
+        "Created course blueprint",
+        artifact="course_blueprint.md",
+        detail=(
+            f"{len(blueprint.week_plan)} weeks, {schedule['lecture_count']} lectures, "
+            f"{len(blueprint.assessment_plan)} planned assessments"
+        ),
+        snippet=content_snippet(_blueprint_preview(blueprint)),
+    )
     update_manifest_artifacts(
         course_root,
         [
@@ -77,6 +121,15 @@ def plan_course(course_root: str | Path) -> CourseBlueprint:
     )
     complete_stage(course_root, "blueprint", blueprint_artifacts)
     return blueprint
+
+
+def _blueprint_preview(blueprint: CourseBlueprint) -> str:
+    first_week = blueprint.week_plan[0]
+    first_outcome = blueprint.outcomes[0]
+    return (
+        f"{blueprint.course_title}. Week {first_week.week}: {first_week.title}. "
+        f"First outcome: {first_outcome}"
+    )
 
 
 def _subject_from_prompt(prompt: str) -> str:

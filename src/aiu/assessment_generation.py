@@ -5,6 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 
 from aiu.artifact_store import ArtifactStore
+from aiu.course_memory import record_assessment_memory
+from aiu.logging import ProgressCallback, content_snippet, emit_progress
 from aiu.models import Assessment, AssessmentType, CourseBlueprint
 from aiu.project import update_manifest_artifacts
 from aiu.state import complete_stage, record_artifact_complete, stage_is_complete, start_stage
@@ -14,7 +16,12 @@ class AssessmentGenerationError(ValueError):
     """Raised when assessment artifacts cannot be generated."""
 
 
-def generate_assessment_artifacts(course_root: str | Path, *, force: bool = False) -> list[str]:
+def generate_assessment_artifacts(
+    course_root: str | Path,
+    *,
+    force: bool = False,
+    progress: ProgressCallback | None = None,
+) -> list[str]:
     """Generate homework, quizzes, exams, project, rubrics, and answer keys."""
 
     store = ArtifactStore(course_root)
@@ -29,28 +36,137 @@ def generate_assessment_artifacts(course_root: str | Path, *, force: bool = Fals
         for artifact in _artifact_paths_for_assessment(assessment)
     ]
     if not force and stage_is_complete(course_root, "assessments", expected_artifacts):
+        emit_progress(
+            progress,
+            "assessments",
+            "Reusing completed assessments stage",
+            detail=f"{len(assessments)} assessment(s), {len(expected_artifacts)} artifact(s).",
+        )
         return expected_artifacts
 
     start_stage(course_root, "assessments")
+    emit_progress(
+        progress,
+        "assessments",
+        "Generating homework, quizzes, exams, rubrics, and answer keys",
+        detail=f"{len(assessments)} assessment(s) planned.",
+    )
+
+    written = _write_assessments(
+        course_root,
+        assessments,
+        force=force,
+        progress=progress,
+    )
+    complete_stage(course_root, "assessments", written)
+    emit_progress(
+        progress,
+        "assessments",
+        "Completed assessments stage",
+        detail=f"{len(written)} artifact(s) written.",
+    )
+    return written
+
+
+def generate_assessment_week(
+    course_root: str | Path,
+    *,
+    week: int,
+    force: bool = False,
+    progress: ProgressCallback | None = None,
+) -> list[str]:
+    """Generate assessments due in one week without completing the whole stage."""
+
+    store = ArtifactStore(course_root)
+    if not store.course_path("approved_course_blueprint.json").exists():
+        raise AssessmentGenerationError("Cannot generate assessments before blueprint approval.")
+    blueprint = CourseBlueprint.model_validate(store.read_json("approved_course_blueprint.json"))
+    assessments = [
+        assessment
+        for assessment in _assessments_for_blueprint(blueprint)
+        if assessment.due_week == week
+    ]
+    if not assessments:
+        return []
+    start_stage(course_root, "assessments")
+    return _write_assessments(
+        course_root,
+        assessments,
+        force=force,
+        progress=progress,
+    )
+
+
+def expected_assessment_artifacts(course_root: str | Path) -> list[str]:
+    """Return all expected assessment, rubric, and answer-key artifacts."""
+
+    store = ArtifactStore(course_root)
+    blueprint = CourseBlueprint.model_validate(store.read_json("approved_course_blueprint.json"))
+    return [
+        artifact
+        for assessment in _assessments_for_blueprint(blueprint)
+        for artifact in _artifact_paths_for_assessment(assessment)
+    ]
+
+
+def complete_assessment_stage_if_ready(course_root: str | Path) -> list[str]:
+    """Mark the assessment stage complete when all expected artifacts exist."""
+
+    store = ArtifactStore(course_root)
+    artifacts = expected_assessment_artifacts(course_root)
+    if all(store.course_path(artifact).exists() for artifact in artifacts):
+        complete_stage(course_root, "assessments", artifacts)
+    return artifacts
+
+
+def _write_assessments(
+    course_root: str | Path,
+    assessments: list[Assessment],
+    *,
+    force: bool,
+    progress: ProgressCallback | None,
+) -> list[str]:
+    store = ArtifactStore(course_root)
     manifest_entries: list[tuple[str, str, str]] = []
     written: list[str] = []
+    for index, assessment in enumerate(assessments, start=1):
+        artifacts = _artifact_paths_for_assessment(assessment)
+        content_path, json_path, rubric_path, answer_key_path = artifacts
+        if not force and all(store.course_path(path).exists() for path in artifacts):
+            existing = Assessment.model_validate(store.read_json(json_path))
+            record_assessment_memory(course_root, existing, artifact_ref=content_path)
+            emit_progress(
+                progress,
+                "assessments",
+                f"Reusing {assessment.type.value} assessment",
+                artifact=content_path,
+                current=index,
+                total=len(assessments),
+            )
+            written.extend(artifacts)
+            continue
 
-    for assessment in assessments:
-        content_path, json_path, rubric_path, answer_key_path = _artifact_paths_for_assessment(
-            assessment
-        )
-        store.write_markdown(content_path, _assessment_markdown(assessment))
+        content = _assessment_markdown(assessment)
+        rubric = f"# Rubric: {assessment.assessment_id}\n\n{assessment.rubric}\n"
+        answer_key = f"# Answer Key: {assessment.assessment_id}\n\n{assessment.answer_key}\n"
+        store.write_markdown(content_path, content)
         store.write_json(json_path, assessment)
-        store.write_markdown(
-            rubric_path, f"# Rubric: {assessment.assessment_id}\n\n{assessment.rubric}\n"
-        )
-        store.write_markdown(
-            answer_key_path,
-            f"# Answer Key: {assessment.assessment_id}\n\n{assessment.answer_key}\n",
-        )
-        for path in (content_path, json_path, rubric_path, answer_key_path):
+        store.write_markdown(rubric_path, rubric)
+        store.write_markdown(answer_key_path, answer_key)
+        record_assessment_memory(course_root, assessment, artifact_ref=content_path)
+        for path in artifacts:
             record_artifact_complete(course_root, "assessments", path)
             written.append(path)
+        emit_progress(
+            progress,
+            "assessments",
+            f"Created {assessment.type.value} assessment",
+            artifact=content_path,
+            current=index,
+            total=len(assessments),
+            detail=f"rubric: {rubric_path}; answer key: {answer_key_path}",
+            snippet=content_snippet(content),
+        )
         manifest_entries.extend(
             [
                 (f"{assessment.assessment_id}_markdown", "markdown", content_path),
@@ -59,9 +175,7 @@ def generate_assessment_artifacts(course_root: str | Path, *, force: bool = Fals
                 (f"{assessment.assessment_id}_answer_key", "markdown", answer_key_path),
             ]
         )
-
     update_manifest_artifacts(course_root, manifest_entries)
-    complete_stage(course_root, "assessments", written)
     return written
 
 

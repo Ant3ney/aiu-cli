@@ -111,3 +111,101 @@ def test_completed_blueprint_stage_is_skipped_on_repeated_plan(tmp_path: Path) -
     assert first.returncode == 0, first.stderr
     assert second.returncode == 0, second.stderr
     assert (course_root / "course_blueprint.json").stat().st_mtime_ns == blueprint_mtime
+
+
+def test_course_resume_continues_from_blueprint_checkpoint(tmp_path: Path) -> None:
+    course_root = tmp_path / "course"
+    create = run_aiu(
+        "course",
+        "create",
+        "Teach me operating systems",
+        "--provider",
+        "fake",
+        "--weeks",
+        "1",
+        "--lectures-per-week",
+        "1",
+        "--lecture-hours",
+        "0.25",
+        "--output",
+        str(course_root),
+        "--yes",
+        "--generate-until",
+        "blueprint",
+        cwd=tmp_path,
+    )
+    resumed = run_aiu("course", "resume", str(course_root), "--yes", cwd=tmp_path)
+
+    assert create.returncode == 0, create.stderr
+    assert resumed.returncode == 0, resumed.stderr
+    assert "Resumed AI University course package" in resumed.stdout
+    assert (course_root / "validation_report.json").is_file()
+    assert (course_root / "course_memory.json").is_file()
+    state = read_state(course_root)
+    assert state["stages"]["validation"]["status"] == "complete"
+
+
+def test_course_resume_requires_approval_or_yes(tmp_path: Path) -> None:
+    course_root = tmp_path / "course"
+    create = run_aiu(
+        "course",
+        "create",
+        "Teach me operating systems",
+        "--provider",
+        "fake",
+        "--weeks",
+        "1",
+        "--lectures-per-week",
+        "1",
+        "--lecture-hours",
+        "0.25",
+        "--output",
+        str(course_root),
+        "--generate-until",
+        "blueprint",
+        cwd=tmp_path,
+    )
+    resumed = run_aiu("course", "resume", str(course_root), cwd=tmp_path)
+
+    assert create.returncode == 0, create.stderr
+    assert resumed.returncode != 0
+    assert "not approved" in resumed.stderr
+
+
+def test_course_resume_repairs_missing_artifact_without_rewriting_completed_work(
+    tmp_path: Path,
+) -> None:
+    course_root = tmp_path / "course"
+    create = run_aiu(
+        "course",
+        "create",
+        "Teach me operating systems",
+        "--provider",
+        "fake",
+        "--weeks",
+        "2",
+        "--lectures-per-week",
+        "1",
+        "--lecture-hours",
+        "0.25",
+        "--output",
+        str(course_root),
+        "--yes",
+        cwd=tmp_path,
+    )
+    completed_lecture = course_root / "lectures" / "week_01" / "day_01.md"
+    completed_mtime = completed_lecture.stat().st_mtime_ns
+    missing_paths = [
+        course_root / "lectures" / "week_02" / "day_01.md",
+        course_root / "lectures" / "week_02" / "day_01.json",
+        course_root / "vr_handoff" / "lecture_scene_cues" / "lecture_w02_d01.json",
+    ]
+    for path in missing_paths:
+        path.unlink()
+
+    resumed = run_aiu("course", "resume", str(course_root), cwd=tmp_path)
+
+    assert create.returncode == 0, create.stderr
+    assert resumed.returncode == 0, resumed.stderr
+    assert completed_lecture.stat().st_mtime_ns == completed_mtime
+    assert all(path.is_file() for path in missing_paths)

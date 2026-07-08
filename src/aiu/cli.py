@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from pathlib import Path
 
 import click
 
@@ -13,11 +14,12 @@ from aiu.exports import ExportError, export_course
 from aiu.extract import extract_and_chunk_sources
 from aiu.generation import GenerationError, generate_course
 from aiu.ingest import inventory_context_paths, write_inventory_artifacts
-from aiu.logging import configure_logging, log_project_event
+from aiu.logging import CourseLoadingView, configure_logging, emit_progress, log_project_event
 from aiu.planning import PlanningError, plan_course
 from aiu.project import ProjectInitializationError, initialize_project, write_project_prompt
 from aiu.prompt import PromptIntakeError, read_prompt_text
 from aiu.regeneration import RegenerationError, regenerate_artifact
+from aiu.resume import ResumeError, resume_course
 from aiu.state import status_lines
 from aiu.validation import CourseValidationError, validate_course
 from aiu.version import __version__
@@ -191,6 +193,7 @@ def course_create(
 ) -> None:
     """Create a course project from a learning prompt and optional context."""
 
+    progress_view: CourseLoadingView | None = None
     try:
         prompt = read_prompt_text(
             prompt_text=prompt_text,
@@ -207,28 +210,88 @@ def course_create(
             provider=provider.lower(),
         )
         project = initialize_project(output_path, settings=settings)
+        progress_view = CourseLoadingView(project.paths.root)
+        progress_view.start(
+            "AI University course creation",
+            detail=(
+                f"{weeks} week(s), {lectures_per_week} lecture(s)/week, "
+                f"provider {provider.lower()}"
+            ),
+        )
+        emit_progress(
+            progress_view,
+            "project",
+            "Initialized project workspace",
+            artifact="manifest.json",
+            detail=str(project.paths.root),
+        )
         log_project_event(project.paths.root, "project initialized")
         write_project_prompt(project, prompt)
+        emit_progress(
+            progress_view,
+            "inputs",
+            "Stored learning prompt",
+            artifact="prompt.md",
+            detail=f"{len(prompt.split())} word(s), {len(prompt)} character(s)",
+        )
         log_project_event(project.paths.root, "prompt stored")
         if context_paths:
+            emit_progress(
+                progress_view,
+                "context",
+                "Inventorying context paths",
+                detail=f"{len(context_paths)} path(s) supplied.",
+            )
             inventory = inventory_context_paths(context_paths, excludes=exclude_patterns)
+            emit_progress(
+                progress_view,
+                "context",
+                "Context inventory complete",
+                artifact="source_manifest.json",
+                detail=(
+                    f"{len(inventory.sources)} accepted, {len(inventory.skipped)} skipped, "
+                    f"{len(inventory.ignored)} ignored, {len(inventory.errors)} error(s)"
+                ),
+            )
             write_inventory_artifacts(project.paths.root, inventory)
-            extract_and_chunk_sources(project.paths.root, inventory)
+            extract_and_chunk_sources(project.paths.root, inventory, progress=progress_view)
             log_project_event(project.paths.root, "context inventoried and extracted")
         if generate_until == "blueprint":
-            plan_course(project.paths.root)
+            plan_course(project.paths.root, progress=progress_view)
             log_project_event(project.paths.root, "blueprint generated")
         elif yes and not init_only:
-            plan_course(project.paths.root)
+            plan_course(project.paths.root, progress=progress_view)
             log_project_event(project.paths.root, "blueprint generated")
             approve_course(project.paths.root, mode="auto")
+            emit_progress(
+                progress_view,
+                "approval",
+                "Approved generated blueprint",
+                artifact="approved_course_blueprint.json",
+                detail="Automatic approval requested with --yes.",
+            )
             log_project_event(project.paths.root, "blueprint approved")
-            generate_course(project.paths.root)
+            generate_course(project.paths.root, progress=progress_view)
             log_project_event(project.paths.root, "all generation stages completed")
+            emit_progress(
+                progress_view,
+                "validation",
+                "Running final course validation",
+                artifact="validation_report.json",
+            )
             report = validate_course(project.paths.root)
+            emit_progress(
+                progress_view,
+                "validation",
+                "Validation complete",
+                artifact="validation_report.json",
+                detail=f"status={report.status.value}; {len(report.checks)} check(s)",
+            )
             log_project_event(
                 project.paths.root, f"validation completed with status {report.status.value}"
             )
+        if progress_view is not None:
+            progress_view.finish("Course creation command finished.")
     except (
         ApprovalError,
         CourseValidationError,
@@ -237,13 +300,17 @@ def course_create(
         PromptIntakeError,
         ProjectInitializationError,
     ) as exc:
+        if progress_view is not None:
+            progress_view.fail(str(exc))
         raise click.ClickException(str(exc)) from exc
 
     click.echo(f"Created AI University course project at {project.paths.root}")
     if context_paths:
         click.echo(f"Inventoried {len(inventory.sources)} context source(s).")
     if not init_only:
-        if yes:
+        if generate_until == "blueprint":
+            click.echo("Generated course blueprint; full course generation is still pending.")
+        elif yes:
             click.echo("Generated and validated AI University course package.")
         else:
             click.echo(
@@ -257,10 +324,18 @@ def course_create(
 def course_plan(course_root: str) -> None:
     """Generate or inspect a course blueprint before full generation."""
 
+    progress_view: CourseLoadingView | None = None
+    if Path(course_root).exists():
+        progress_view = CourseLoadingView(course_root)
+        progress_view.start("AI University course planning", detail=str(Path(course_root)))
     try:
-        blueprint = plan_course(course_root)
+        blueprint = plan_course(course_root, progress=progress_view)
     except PlanningError as exc:
+        if progress_view is not None:
+            progress_view.fail(str(exc))
         raise click.ClickException(str(exc)) from exc
+    if progress_view is not None:
+        progress_view.finish(f"Generated course blueprint: {blueprint.course_title}")
     click.echo(f"Generated course blueprint: {blueprint.course_title}")
 
 
@@ -303,6 +378,14 @@ def course_generate(
 ) -> None:
     """Generate course artifacts for all or part of a project."""
 
+    progress_view: CourseLoadingView | None = None
+    if not dry_run and Path(course_root).exists():
+        selected_stage = stage.lower() if stage is not None else "all"
+        progress_view = CourseLoadingView(course_root)
+        progress_view.start(
+            "AI University course generation",
+            detail=f"stage={selected_stage}, force={force}",
+        )
     try:
         result = generate_course(
             course_root,
@@ -311,14 +394,19 @@ def course_generate(
             stage=stage.lower() if stage is not None else None,
             force=force,
             from_ref=from_ref,
+            progress=progress_view,
             to_ref=to_ref,
         )
     except GenerationError as exc:
+        if progress_view is not None:
+            progress_view.fail(str(exc))
         raise click.ClickException(str(exc)) from exc
 
     if result["dry_run"]:
         click.echo(f"Generation dry run ready for stage: {result['stage']}")
     else:
+        if progress_view is not None:
+            progress_view.finish(str(result["message"]))
         click.echo(str(result["message"]))
 
 
@@ -333,11 +421,47 @@ def course_generate(
 def course_regenerate(course_root: str, artifact_ref: str) -> None:
     """Regenerate selected weeks, lectures, labs, or assessments."""
 
+    progress_view: CourseLoadingView | None = None
+    if Path(course_root).exists():
+        progress_view = CourseLoadingView(course_root)
+        progress_view.start("AI University course regeneration", detail=artifact_ref)
     try:
-        artifacts = regenerate_artifact(course_root, artifact_ref)
+        artifacts = regenerate_artifact(course_root, artifact_ref, progress=progress_view)
     except RegenerationError as exc:
+        if progress_view is not None:
+            progress_view.fail(str(exc))
         raise click.ClickException(str(exc)) from exc
+    if progress_view is not None:
+        progress_view.finish(f"Regenerated {len(artifacts)} artifact(s).")
     click.echo(f"Regenerated {len(artifacts)} artifact(s).")
+
+
+@course.command("resume")
+@click.argument("course_root", type=click.Path(exists=False, path_type=str))
+@click.option(
+    "--yes",
+    is_flag=True,
+    help="Approve an unapproved blueprint before resuming generation.",
+)
+def course_resume(course_root: str, yes: bool) -> None:
+    """Resume an interrupted course creation run from checkpoints."""
+
+    progress_view: CourseLoadingView | None = None
+    if Path(course_root).exists():
+        progress_view = CourseLoadingView(course_root)
+        progress_view.start(
+            "AI University course resume",
+            detail="continue from durable checkpoints and existing artifacts",
+        )
+    try:
+        result = resume_course(course_root, yes=yes, progress=progress_view)
+    except ResumeError as exc:
+        if progress_view is not None:
+            progress_view.fail(str(exc))
+        raise click.ClickException(str(exc)) from exc
+    if progress_view is not None:
+        progress_view.finish(f"Resume complete with validation status {result['status']}.")
+    click.echo(f"Resumed AI University course package with status: {result['status']}")
 
 
 @course.command("status")

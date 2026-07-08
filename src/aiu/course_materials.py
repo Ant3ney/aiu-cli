@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from aiu.artifact_store import ArtifactStore
+from aiu.logging import ProgressCallback, content_snippet, emit_progress
 from aiu.models import CourseBlueprint
 from aiu.project import update_manifest_artifacts
 from aiu.state import complete_stage, stage_is_complete, start_stage
@@ -22,11 +23,22 @@ class CourseMaterialError(ValueError):
     """Raised when course-level artifacts cannot be generated."""
 
 
-def generate_syllabus_artifacts(course_root: str | Path, *, force: bool = False) -> list[str]:
+def generate_syllabus_artifacts(
+    course_root: str | Path,
+    *,
+    force: bool = False,
+    progress: ProgressCallback | None = None,
+) -> list[str]:
     """Generate top-level human-facing course materials."""
 
     store = ArtifactStore(course_root)
     if not force and stage_is_complete(course_root, "syllabus", SYLLABUS_ARTIFACTS):
+        emit_progress(
+            progress,
+            "syllabus",
+            "Reusing completed syllabus stage",
+            detail=f"{len(SYLLABUS_ARTIFACTS)} artifact(s) already exist.",
+        )
         return list(SYLLABUS_ARTIFACTS)
 
     approved_path = store.course_path("approved_course_blueprint.json")
@@ -36,11 +48,46 @@ def generate_syllabus_artifacts(course_root: str | Path, *, force: bool = False)
     start_stage(course_root, "syllabus")
     blueprint = CourseBlueprint.model_validate(store.read_json("approved_course_blueprint.json"))
     source_refs = _source_refs(store)
+    emit_progress(
+        progress,
+        "syllabus",
+        "Drafting course-level learner materials",
+        detail=f"{blueprint.course_title}; {len(source_refs)} source reference(s)",
+    )
 
-    store.write_markdown("syllabus/syllabus.md", _syllabus_markdown(blueprint, source_refs))
-    store.write_markdown("syllabus/grading_policy.md", _grading_policy_markdown(blueprint))
-    store.write_markdown("syllabus/reading_list.md", _reading_list_markdown(source_refs))
-    store.write_markdown("study_guides/course_overview.md", _course_overview_markdown(blueprint))
+    syllabus = _syllabus_markdown(blueprint, source_refs)
+    grading_policy = _grading_policy_markdown(blueprint)
+    reading_list = _reading_list_markdown(source_refs)
+    course_overview = _course_overview_markdown(blueprint)
+
+    _write_markdown_with_progress(
+        store,
+        "syllabus/syllabus.md",
+        syllabus,
+        progress=progress,
+        message="Created syllabus",
+    )
+    _write_markdown_with_progress(
+        store,
+        "syllabus/grading_policy.md",
+        grading_policy,
+        progress=progress,
+        message="Created grading policy",
+    )
+    _write_markdown_with_progress(
+        store,
+        "syllabus/reading_list.md",
+        reading_list,
+        progress=progress,
+        message="Created reading list",
+    )
+    _write_markdown_with_progress(
+        store,
+        "study_guides/course_overview.md",
+        course_overview,
+        progress=progress,
+        message="Created course overview",
+    )
     update_manifest_artifacts(
         course_root,
         [
@@ -51,7 +98,31 @@ def generate_syllabus_artifacts(course_root: str | Path, *, force: bool = False)
         ],
     )
     complete_stage(course_root, "syllabus", list(SYLLABUS_ARTIFACTS))
+    emit_progress(
+        progress,
+        "syllabus",
+        "Completed syllabus stage",
+        detail=f"{len(SYLLABUS_ARTIFACTS)} artifact(s) written.",
+    )
     return list(SYLLABUS_ARTIFACTS)
+
+
+def _write_markdown_with_progress(
+    store: ArtifactStore,
+    relative_path: str,
+    markdown: str,
+    *,
+    progress: ProgressCallback | None,
+    message: str,
+) -> None:
+    store.write_markdown(relative_path, markdown)
+    emit_progress(
+        progress,
+        "syllabus",
+        message,
+        artifact=relative_path,
+        snippet=content_snippet(markdown),
+    )
 
 
 def _source_refs(store: ArtifactStore) -> list[str]:

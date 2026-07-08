@@ -11,6 +11,7 @@ from typing import Any
 
 from aiu.artifact_store import ArtifactStore
 from aiu.ingest import SUPPORTED_EXTENSIONS, InventoryResult
+from aiu.logging import ProgressCallback, emit_progress
 from aiu.models import ExtractionStatus, SourceManifestIndex
 from aiu.state import complete_stage
 
@@ -64,14 +65,31 @@ class ExtractionResult:
 
 
 def extract_and_chunk_sources(
-    course_root: str | Path, inventory: InventoryResult
+    course_root: str | Path,
+    inventory: InventoryResult,
+    *,
+    progress: ProgressCallback | None = None,
 ) -> ExtractionResult:
     """Extract readable sources, write text artifacts, and build a local chunk index."""
 
     store = ArtifactStore(course_root)
     extraction = ExtractionResult()
+    emit_progress(
+        progress,
+        "context",
+        "Extracting readable context sources",
+        detail=f"{len(inventory.sources)} inventoried source(s)",
+    )
 
-    for source in inventory.sources:
+    for index, source in enumerate(inventory.sources, start=1):
+        emit_progress(
+            progress,
+            "context",
+            f"Reading {source.type} source",
+            current=index,
+            total=len(inventory.sources),
+            detail=source.path_or_url,
+        )
         source_path = inventory.source_paths.get(source.source_id)
         if source_path is None:
             source.extraction_status = ExtractionStatus.FAILED
@@ -100,6 +118,15 @@ def extract_and_chunk_sources(
             source.extraction_status = ExtractionStatus.EXTRACTED
             extraction.chunks.extend(source_chunks)
             extraction.extracted_count += 1
+            emit_progress(
+                progress,
+                "context",
+                "Chunked text source",
+                artifact=extracted["text_ref"],
+                current=index,
+                total=len(inventory.sources),
+                detail=f"{len(source_chunks)} chunk(s) from {source.path_or_url}",
+            )
         elif source.type == "archive":
             archive_chunks = _extract_zip_archive(
                 store, source.source_id, source.path_or_url, source_path
@@ -118,17 +145,51 @@ def extract_and_chunk_sources(
             if archive_chunks:
                 extraction.extracted_count += 1
                 extraction.chunks.extend(archive_chunks)
+                emit_progress(
+                    progress,
+                    "context",
+                    "Chunked archive source",
+                    current=index,
+                    total=len(inventory.sources),
+                    detail=f"{len(archive_chunks)} chunk(s) from {source.path_or_url}",
+                )
             else:
                 source.errors.append("zip archive contained no supported text files")
                 extraction.skipped_count += 1
+                emit_progress(
+                    progress,
+                    "context",
+                    "Skipped archive with no supported text files",
+                    current=index,
+                    total=len(inventory.sources),
+                    detail=source.path_or_url,
+                )
         else:
             source.extraction_status = ExtractionStatus.SKIPPED
             reason = f"{source.type} extraction is not implemented yet"
             source.errors.append(reason)
             extraction.skipped_count += 1
+            emit_progress(
+                progress,
+                "context",
+                "Recorded source placeholder",
+                current=index,
+                total=len(inventory.sources),
+                detail=f"{source.path_or_url}: {reason}",
+            )
 
     extraction.chunks.sort(key=lambda chunk: (chunk.source_ref, chunk.sequence, chunk.chunk_id))
     _write_extraction_artifacts(store, inventory, extraction)
+    emit_progress(
+        progress,
+        "context",
+        "Wrote source index",
+        artifact="source_index/chunk_manifest.json",
+        detail=(
+            f"{extraction.extracted_count} extracted, {extraction.skipped_count} skipped, "
+            f"{len(extraction.chunks)} chunk(s)"
+        ),
+    )
     return extraction
 
 
