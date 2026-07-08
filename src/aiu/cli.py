@@ -321,7 +321,12 @@ def course_create(
 
 @course.command("plan")
 @click.argument("course_root", type=click.Path(exists=False, path_type=str))
-def course_plan(course_root: str) -> None:
+@click.option(
+    "--force",
+    is_flag=True,
+    help="Regenerate the blueprint even if planning was already completed.",
+)
+def course_plan(course_root: str, force: bool) -> None:
     """Generate or inspect a course blueprint before full generation."""
 
     progress_view: CourseLoadingView | None = None
@@ -329,7 +334,7 @@ def course_plan(course_root: str) -> None:
         progress_view = CourseLoadingView(course_root)
         progress_view.start("AI University course planning", detail=str(Path(course_root)))
     try:
-        blueprint = plan_course(course_root, progress=progress_view)
+        blueprint = plan_course(course_root, force=force, progress=progress_view)
     except PlanningError as exc:
         if progress_view is not None:
             progress_view.fail(str(exc))

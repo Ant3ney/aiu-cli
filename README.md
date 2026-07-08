@@ -158,6 +158,8 @@ word count from that configured duration.
   pending, failed, and skipped stages.
 - If course creation was interrupted, run `aiu course resume <course> --yes`
   to continue from checkpointed artifacts and finish validation.
+- If an existing blueprint needs to be rebuilt after planner improvements, run
+  `aiu course plan <course> --force`, then approve and generate again.
 - Re-run `aiu course generate <course>` to resume completed stages without
   rewriting them, or use `--force` for an intentional regeneration.
 - Use `aiu course regenerate <course> --artifact lecture:w08:d01` for targeted

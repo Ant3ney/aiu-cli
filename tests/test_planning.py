@@ -63,6 +63,14 @@ def test_course_plan_generates_blueprint_and_default_schedule(tmp_path: Path) ->
     assert blueprint["assessment_plan"]
     assert blueprint["source_usage_plan"]
     assert blueprint["lab_policy"] == "auto"
+    week_titles = [week["title"] for week in blueprint["week_plan"]]
+    lecture_titles = [
+        title for week in blueprint["week_plan"] for title in week["lecture_titles"]
+    ]
+    assert len(set(week_titles)) == len(week_titles)
+    assert not any(title.startswith("Week ") for title in week_titles)
+    assert "Focus Area" not in " ".join(week_titles)
+    assert "Topic 1.1" not in " ".join(lecture_titles)
 
     lectures = [item for item in schedule["items"] if item["type"] == "lecture"]
     assert len(lectures) == 48
@@ -84,6 +92,21 @@ def test_course_plan_honors_custom_week_and_lecture_counts(tmp_path: Path) -> No
     lectures = [item for item in schedule["items"] if item["type"] == "lecture"]
     assert len(lectures) == 3
     assert schedule["lecture_count"] == 3
+
+
+def test_course_plan_force_regenerates_completed_blueprint(tmp_path: Path) -> None:
+    course_root = create_course(tmp_path)
+    first = run_aiu("course", "plan", str(course_root), cwd=tmp_path)
+    blueprint_markdown = course_root / "course_blueprint.md"
+    blueprint_markdown.write_text("stale blueprint\n", encoding="utf-8")
+
+    forced = run_aiu("course", "plan", str(course_root), "--force", cwd=tmp_path)
+
+    assert first.returncode == 0, first.stderr
+    assert forced.returncode == 0, forced.stderr
+    regenerated = blueprint_markdown.read_text(encoding="utf-8")
+    assert "stale blueprint" not in regenerated
+    assert "Course Map, Core Vocabulary, and Success Criteria" in regenerated
 
 
 def test_course_plan_requires_stored_prompt(tmp_path: Path) -> None:

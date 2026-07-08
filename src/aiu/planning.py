@@ -29,7 +29,10 @@ class PlanningError(ValueError):
 
 
 def plan_course(
-    course_root: str | Path, *, progress: ProgressCallback | None = None
+    course_root: str | Path,
+    *,
+    force: bool = False,
+    progress: ProgressCallback | None = None,
 ) -> CourseBlueprint:
     """Generate deterministic intent analysis, blueprint, and schedule artifacts."""
 
@@ -40,7 +43,7 @@ def plan_course(
         "course_blueprint.md",
         "schedule.json",
     ]
-    if stage_is_complete(course_root, "blueprint", blueprint_artifacts):
+    if not force and stage_is_complete(course_root, "blueprint", blueprint_artifacts):
         emit_progress(
             progress,
             "blueprint",
@@ -179,7 +182,11 @@ def _blueprint_from_intent(intent: dict[str, Any], settings: CourseSettings) -> 
     ]
     weeks = list(range(1, settings.weeks + 1))
     modules = _modules(subject, weeks, outcomes)
-    week_plan = [_week_plan(subject, week, settings) for week in weeks]
+    progression = _curriculum_progression(subject, settings.weeks)
+    week_plan = [
+        _week_plan(subject, week, settings, focus=progression[week - 1])
+        for week in weeks
+    ]
     assessment_plan = _assessment_plan(outcomes, settings)
     source_usage_plan = [
         "Use provided source chunks where available.",
@@ -206,6 +213,14 @@ def _blueprint_from_intent(intent: dict[str, Any], settings: CourseSettings) -> 
 
 
 def _modules(subject: str, weeks: list[int], outcomes: list[str]) -> list[CourseModule]:
+    module_titles = [
+        "Foundations and Scope",
+        "Models, Data, and Architecture",
+        "Interaction, Rules, and Feedback",
+        "Quality, Operations, and Iteration",
+        "Integration and Capstone",
+        "Synthesis and Future Directions",
+    ]
     module_count = min(6, max(1, (len(weeks) + 3) // 4))
     modules: list[CourseModule] = []
     for index in range(module_count):
@@ -215,7 +230,7 @@ def _modules(subject: str, weeks: list[int], outcomes: list[str]) -> list[Course
         modules.append(
             CourseModule(
                 module_id=f"module_{index + 1:02d}",
-                title=f"{subject.title()} Module {index + 1}",
+                title=f"{module_titles[index]} in {subject.title()}",
                 weeks=module_weeks,
                 objectives=[outcomes[index % len(outcomes)]],
                 rationale="The module sequence introduces prerequisites before dependent topics.",
@@ -224,20 +239,26 @@ def _modules(subject: str, weeks: list[int], outcomes: list[str]) -> list[Course
     return modules
 
 
-def _week_plan(subject: str, week: int, settings: CourseSettings) -> WeekPlan:
+def _week_plan(
+    subject: str,
+    week: int,
+    settings: CourseSettings,
+    *,
+    focus: dict[str, Any],
+) -> WeekPlan:
     lecture_titles = [
-        f"Week {week} Lecture {day}: {subject.title()} Topic {week}.{day}"
+        _lecture_title(subject, focus, day)
         for day in range(1, settings.lectures_per_week + 1)
     ]
     lab = None
     if settings.lab_policy == LabPolicy.ALWAYS:
-        lab = f"Week {week} applied lab"
+        lab = f"{focus['short']} lab"
     elif settings.lab_policy == LabPolicy.AUTO:
-        lab = f"Week {week} applied workshop"
+        lab = f"{focus['short']} applied workshop"
     return WeekPlan(
         week=week,
-        title=f"Week {week}: {subject.title()} Focus Area",
-        topics=[f"{subject} concept {week}", f"{subject} practice {week}"],
+        title=str(focus["title"]),
+        topics=list(focus["topics"]),
         lecture_titles=lecture_titles,
         lab=lab,
         assessments=[f"homework_w{week:02d}", f"quiz_w{week:02d}" if week % 2 == 0 else ""],
@@ -285,6 +306,207 @@ def _assessment_plan(outcomes: list[str], settings: CourseSettings) -> list[Asse
         )
     )
     return plan
+
+
+def _curriculum_progression(subject: str, week_count: int) -> list[dict[str, Any]]:
+    """Create a non-repetitive course arc from foundations to capstone."""
+
+    arc = _curriculum_arc()
+    if week_count <= len(arc):
+        if week_count == 1:
+            selected = [arc[0]]
+        else:
+            selected = [
+                arc[round(index * (len(arc) - 1) / (week_count - 1))]
+                for index in range(week_count)
+            ]
+    else:
+        selected = list(arc)
+        for week in range(len(arc) + 1, week_count + 1):
+            selected.append(
+                {
+                    "short": f"Advanced studio {week - len(arc)}",
+                    "title": f"Advanced Studio {week - len(arc)}: Specialized Problems",
+                    "topics": [
+                        f"specialized {subject} design problem {week - len(arc)}",
+                        "research critique and implementation tradeoffs",
+                        "portfolio-ready refinement",
+                    ],
+                    "lecture_angles": [
+                        "Specialized problem framing",
+                        "Advanced implementation critique",
+                        "Research and extension workshop",
+                    ],
+                }
+            )
+    return [_focus_for_subject(subject, focus) for focus in selected]
+
+
+def _curriculum_arc() -> list[dict[str, Any]]:
+    return [
+        {
+            "short": "Course map and vocabulary",
+            "title": "Course Map, Core Vocabulary, and Success Criteria",
+            "topics": ["course scope", "core vocabulary", "success criteria"],
+            "lecture_angles": ["Problem space and learning map", "Core vocabulary in practice"],
+        },
+        {
+            "short": "Domain boundaries",
+            "title": "Domain Boundaries, Requirements, and User Goals",
+            "topics": ["domain boundaries", "requirements", "learner or user goals"],
+            "lecture_angles": ["Requirements and constraints", "User goals and tradeoffs"],
+        },
+        {
+            "short": "Core models",
+            "title": "Core Models, Entities, and Relationships",
+            "topics": ["entities", "relationships", "conceptual model"],
+            "lecture_angles": ["Entity model design", "Relationship modeling workshop"],
+        },
+        {
+            "short": "Data design",
+            "title": "Data Schemas, Identifiers, and Change Management",
+            "topics": ["schemas", "identifiers", "data evolution"],
+            "lecture_angles": ["Schema design", "Versioning and migration choices"],
+        },
+        {
+            "short": "Rules and validation",
+            "title": "Rules, Constraints, and Validation",
+            "topics": ["rule systems", "constraints", "validation strategy"],
+            "lecture_angles": ["Rules as explicit systems", "Validation and edge cases"],
+        },
+        {
+            "short": "Progression and feedback",
+            "title": "Progression Systems and Feedback Loops",
+            "topics": ["progression", "feedback loops", "motivation and pacing"],
+            "lecture_angles": ["Progression model", "Feedback loop design"],
+        },
+        {
+            "short": "Runtime architecture",
+            "title": "Runtime Architecture and System Boundaries",
+            "topics": ["architecture", "boundaries", "runtime responsibilities"],
+            "lecture_angles": ["Architecture layers", "Boundary and dependency critique"],
+        },
+        {
+            "short": "Authoring workflow",
+            "title": "Authoring Tools, Content Workflow, and Collaboration",
+            "topics": ["authoring tools", "content workflow", "collaboration"],
+            "lecture_angles": ["Authoring workflow", "Tooling and review process"],
+        },
+        {
+            "short": "State and persistence",
+            "title": "State, Persistence, Saves, and Recovery",
+            "topics": ["state", "persistence", "recovery"],
+            "lecture_angles": ["State model", "Persistence and recovery cases"],
+        },
+        {
+            "short": "Interaction systems",
+            "title": "Interaction Systems and Moment-to-Moment Flow",
+            "topics": ["interaction loops", "state transitions", "flow"],
+            "lecture_angles": ["Interaction loop anatomy", "Flow and transition design"],
+        },
+        {
+            "short": "Balance and tuning",
+            "title": "Balancing, Tuning, and Evaluation Metrics",
+            "topics": ["balancing", "tuning", "metrics"],
+            "lecture_angles": ["Balancing strategy", "Metrics and iteration workshop"],
+        },
+        {
+            "short": "Midcourse integration",
+            "title": "Midcourse Integration and Architecture Review",
+            "topics": ["integration", "architecture review", "risk assessment"],
+            "lecture_angles": ["Integration review", "Risk and tradeoff critique"],
+        },
+        {
+            "short": "Extensibility",
+            "title": "Extensibility, Modularity, and Future Features",
+            "topics": ["extensibility", "modularity", "future feature design"],
+            "lecture_angles": ["Extension points", "Modularity tradeoffs"],
+        },
+        {
+            "short": "Testing strategy",
+            "title": "Testing Strategy and Quality Gates",
+            "topics": ["testing", "quality gates", "regression prevention"],
+            "lecture_angles": ["Test plan design", "Quality gates and failure modes"],
+        },
+        {
+            "short": "Performance",
+            "title": "Performance, Scale, and Reliability",
+            "topics": ["performance", "scale", "reliability"],
+            "lecture_angles": ["Performance model", "Reliability under load"],
+        },
+        {
+            "short": "Experience design",
+            "title": "Experience Design, Onboarding, and Accessibility",
+            "topics": ["experience design", "onboarding", "accessibility"],
+            "lecture_angles": ["Onboarding path", "Accessibility and usability critique"],
+        },
+        {
+            "short": "Observability",
+            "title": "Observability, Analytics, and Debugging",
+            "topics": ["observability", "analytics", "debugging"],
+            "lecture_angles": ["Instrumentation model", "Debugging and analytics review"],
+        },
+        {
+            "short": "Security and safety",
+            "title": "Security, Safety, Privacy, and Abuse Cases",
+            "topics": ["security", "safety", "privacy"],
+            "lecture_angles": ["Security boundaries", "Safety and abuse-case review"],
+        },
+        {
+            "short": "Team workflow",
+            "title": "Team Workflow, Versioning, and Release Discipline",
+            "topics": ["team workflow", "versioning", "release discipline"],
+            "lecture_angles": ["Team workflow", "Versioning and release practice"],
+        },
+        {
+            "short": "Operations",
+            "title": "Deployment, Operations, and Long-Term Maintenance",
+            "topics": ["deployment", "operations", "maintenance"],
+            "lecture_angles": ["Operational model", "Maintenance and ownership"],
+        },
+        {
+            "short": "Capstone planning",
+            "title": "Capstone Planning and Design Defense",
+            "topics": ["capstone planning", "design defense", "scope control"],
+            "lecture_angles": ["Capstone proposal", "Design defense workshop"],
+        },
+        {
+            "short": "Capstone build",
+            "title": "Capstone Implementation and Integration Studio",
+            "topics": ["implementation", "integration", "iteration"],
+            "lecture_angles": ["Implementation strategy", "Integration workshop"],
+        },
+        {
+            "short": "Capstone critique",
+            "title": "Capstone Critique, Polish, and Validation",
+            "topics": ["critique", "polish", "validation"],
+            "lecture_angles": ["Critique and polish", "Validation against outcomes"],
+        },
+        {
+            "short": "Final synthesis",
+            "title": "Final Synthesis and Future Learning Path",
+            "topics": ["synthesis", "future learning", "transfer"],
+            "lecture_angles": ["Course synthesis", "Future directions and transfer"],
+        },
+    ]
+
+
+def _focus_for_subject(subject: str, focus: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "short": str(focus["short"]),
+        "title": str(focus["title"]),
+        "topics": [f"{topic} for {subject}" for topic in focus["topics"]],
+        "lecture_angles": list(focus["lecture_angles"]),
+    }
+
+
+def _lecture_title(subject: str, focus: dict[str, Any], day: int) -> str:
+    angles = list(focus["lecture_angles"])
+    if day <= len(angles):
+        angle = angles[day - 1]
+    else:
+        angle = f"Applied studio {day - len(angles)}"
+    return f"{angle}: {focus['short']} in {subject.title()}"
 
 
 def _schedule_from_blueprint(
