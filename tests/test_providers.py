@@ -44,10 +44,14 @@ def test_codex_provider_uses_codex_exec_stdout(tmp_path) -> None:
         "\n".join(
             [
                 "#!/usr/bin/env sh",
-                'if [ "$1" = "exec" ]; then',
+                'actual="$1 $2 $3 $4"',
+                'expected="--dangerously-bypass-approvals-and-sandbox exec"',
+                'expected="$expected --ephemeral --skip-git-repo-check"',
+                'if [ "$actual" = "$expected" ]; then',
                 '  printf "Codex generated course guidance\\n"',
                 "  exit 0",
                 "fi",
+                'printf "unexpected codex args: %s\\n" "$*" >&2',
                 "exit 2",
                 "",
             ]

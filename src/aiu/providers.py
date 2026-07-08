@@ -152,12 +152,9 @@ class CodexProvider:
             result = subprocess.run(
                 [
                     self.codex_command,
+                    "--dangerously-bypass-approvals-and-sandbox",
                     "exec",
                     "--ephemeral",
-                    "--sandbox",
-                    "read-only",
-                    "--ask-for-approval",
-                    "never",
                     "--skip-git-repo-check",
                     prompt,
                 ],

@@ -60,6 +60,10 @@ aiu auth status
 This stores only the fact that AIU should use the local `codex` command. AIU
 does not read or copy Codex tokens from `~/.codex/auth.json`.
 
+When `--provider codex` is used, AIU invokes Codex in yolo mode with
+`--dangerously-bypass-approvals-and-sandbox`. Use this only in course
+workspaces you trust.
+
 ### Option B: OpenAI-compatible API key
 
 Use this path when you want API-key billing instead of Codex login:
