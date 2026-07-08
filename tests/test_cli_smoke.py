@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 from aiu.version import __version__
@@ -10,8 +11,9 @@ from aiu.version import __version__
 def run_aiu(*args: str, cwd: Path) -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
     env.setdefault("PYTHONUTF8", "1")
+    aiu_executable = Path(sys.executable).with_name("aiu")
     return subprocess.run(
-        ["aiu", *args],
+        [str(aiu_executable), *args],
         cwd=cwd,
         env=env,
         text=True,

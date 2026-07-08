@@ -46,3 +46,7 @@ class ProviderConfig(BaseModel):
         default=None,
         description="Name of the environment variable containing the API key.",
     )
+    codex_command: str | None = Field(
+        default=None,
+        description="Command or executable path for the local Codex CLI.",
+    )
