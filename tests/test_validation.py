@@ -63,3 +63,19 @@ def test_validation_failure_returns_nonzero_and_writes_actionable_report(tmp_pat
     assert report["status"] == "fail"
     assert any("schedule.json" in failure for failure in report["failures"])
     assert "Missing required file" in (course_root / "warnings.md").read_text(encoding="utf-8")
+
+
+def test_validation_fails_short_lecture_transcript(tmp_path: Path) -> None:
+    course_root = generated_course(tmp_path)
+    lecture_path = course_root / "lectures" / "week_01" / "day_01.json"
+    lecture = json.loads(lecture_path.read_text(encoding="utf-8"))
+    lecture["transcript"] = "Too short."
+    lecture_path.write_text(json.dumps(lecture, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    result = run_aiu("course", "validate", str(course_root), cwd=tmp_path)
+
+    assert result.returncode != 0
+    report = json.loads((course_root / "validation_report.json").read_text(encoding="utf-8"))
+    assert report["status"] == "fail"
+    assert any("lecture_w01_d01" in failure for failure in report["failures"])
+    assert any("required 18000" in failure for failure in report["failures"])

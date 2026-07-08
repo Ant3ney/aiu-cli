@@ -9,6 +9,7 @@ from pydantic import ValidationError as PydanticValidationError
 
 from aiu.artifact_store import ArtifactStore
 from aiu.config import LabPolicy
+from aiu.lecture_quality import minimum_transcript_words, transcript_word_count
 from aiu.models import (
     CourseBlueprint,
     CourseManifest,
@@ -186,6 +187,18 @@ def _validate_lecture_files(
     failures: list[str],
     schema_errors: list[str],
 ) -> None:
+    duration_by_lecture_id: dict[str, float] = {}
+    for item in schedule.get("items", []):
+        if item.get("type") != "lecture" or item.get("id") is None:
+            continue
+        if item.get("duration_hours") is None:
+            continue
+        try:
+            duration_by_lecture_id[str(item["id"])] = float(item["duration_hours"])
+        except (TypeError, ValueError):
+            continue
+    short_transcripts: list[str] = []
+
     for path in sorted((store.root / "lectures").rglob("*.json")):
         try:
             lecture = LectureSession.model_validate(
@@ -197,6 +210,16 @@ def _validate_lecture_files(
         cue_path = store.course_path(f"vr_handoff/lecture_scene_cues/{lecture.lecture_id}.json")
         if not cue_path.exists():
             failures.append(f"Missing VR cue file for lecture: {lecture.lecture_id}")
+        duration_hours = duration_by_lecture_id.get(
+            lecture.lecture_id, lecture.estimated_duration
+        )
+        required_words = minimum_transcript_words(duration_hours)
+        actual_words = transcript_word_count(lecture.transcript)
+        if actual_words < required_words:
+            short_transcripts.append(
+                f"{lecture.lecture_id} has {actual_words} transcript words; "
+                f"required {required_words}."
+            )
 
     scheduled_ids = {
         item.get("id") for item in schedule.get("items", []) if item.get("type") == "lecture"
@@ -215,6 +238,16 @@ def _validate_lecture_files(
         )
     )
     failures.extend(f"Missing lecture VR cue: {lecture_id}" for lecture_id in missing)
+    checks.append(
+        ValidationCheck(
+            check_id="lectures:transcript_length",
+            status=ValidationStatus.PASS if not short_transcripts else ValidationStatus.FAIL,
+            message="Lecture transcripts meet configured duration targets."
+            if not short_transcripts
+            else f"{len(short_transcripts)} lecture transcript(s) are too short.",
+        )
+    )
+    failures.extend(f"Short lecture transcript: {failure}" for failure in short_transcripts)
 
 
 def _validate_labs(
