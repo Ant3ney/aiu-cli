@@ -9,6 +9,7 @@ from pydantic import ValidationError as PydanticValidationError
 
 from aiu.artifact_store import ArtifactStore
 from aiu.config import LabPolicy
+from aiu.course_rails import RAILS_REF, RAILS_SCHEMA_NAME, RAILS_SCHEMA_VERSION
 from aiu.lecture_quality import minimum_transcript_words, transcript_word_count
 from aiu.models import (
     CourseBlueprint,
@@ -48,6 +49,7 @@ def validate_course(course_root: str | Path) -> ValidationReport:
         "course_blueprint.json",
         "approved_course_blueprint.json",
         "schedule.json",
+        RAILS_REF,
     ]
     for relative_path in required_files:
         _check_file(store, relative_path, checks, failures)
@@ -60,6 +62,7 @@ def validate_course(course_root: str | Path) -> ValidationReport:
 
     if manifest is not None and schedule is not None:
         _validate_schedule(store, manifest, schedule, checks, failures)
+        _validate_rails(store, manifest, checks, failures, schema_errors)
     if blueprint is not None:
         _validate_labs(store, blueprint, checks, failures)
         _validate_assessments(store, checks, failures, schema_errors)
@@ -317,6 +320,85 @@ def _validate_assessments(
         failures.append("No assessment JSON artifacts found.")
 
 
+def _validate_rails(
+    store: ArtifactStore,
+    manifest: CourseManifest,
+    checks: list[ValidationCheck],
+    failures: list[str],
+    schema_errors: list[str],
+) -> None:
+    if not store.course_path(RAILS_REF).exists():
+        return
+    try:
+        rails = store.read_json(RAILS_REF)
+    except (OSError, ValueError) as exc:
+        schema_errors.append(f"{RAILS_REF}: {exc}")
+        return
+
+    schema = rails.get("schema", {})
+    schema_ok = (
+        schema.get("name") == RAILS_SCHEMA_NAME
+        and schema.get("version") == RAILS_SCHEMA_VERSION
+    )
+    checks.append(
+        ValidationCheck(
+            check_id="rails:schema",
+            status=ValidationStatus.PASS if schema_ok else ValidationStatus.FAIL,
+            message="Rails schema is supported."
+            if schema_ok
+            else "Rails schema is missing or unsupported.",
+            artifact_ref=RAILS_REF,
+        )
+    )
+    if not schema_ok:
+        failures.append("rails.json schema is missing or unsupported.")
+
+    lectures = rails.get("artifact_catalog", {}).get("lectures", [])
+    expected_lectures = manifest.settings.weeks * manifest.settings.lectures_per_week
+    lecture_count_ok = isinstance(lectures, list) and len(lectures) == expected_lectures
+    checks.append(
+        ValidationCheck(
+            check_id="rails:lecture_catalog",
+            status=ValidationStatus.PASS if lecture_count_ok else ValidationStatus.FAIL,
+            message=f"Rails catalogs {len(lectures)} lecture(s); expected {expected_lectures}.",
+            artifact_ref=RAILS_REF,
+        )
+    )
+    if not lecture_count_ok:
+        failures.append(
+            f"rails.json lecture catalog mismatch: expected {expected_lectures}, "
+            f"found {len(lectures) if isinstance(lectures, list) else 0}"
+        )
+
+    day_plan = rails.get("day_by_day_plan", [])
+    day_plan_ok = isinstance(day_plan, list) and bool(day_plan)
+    checks.append(
+        ValidationCheck(
+            check_id="rails:day_by_day_plan",
+            status=ValidationStatus.PASS if day_plan_ok else ValidationStatus.FAIL,
+            message="Rails day-by-day plan is present."
+            if day_plan_ok
+            else "Rails day-by-day plan is missing.",
+            artifact_ref=RAILS_REF,
+        )
+    )
+    if not day_plan_ok:
+        failures.append("rails.json day_by_day_plan is missing or empty.")
+
+    missing_refs = _missing_rails_refs(store, rails)
+    checks.append(
+        ValidationCheck(
+            check_id="rails:artifact_refs",
+            status=ValidationStatus.PASS if not missing_refs else ValidationStatus.FAIL,
+            message="Rails artifact references resolve."
+            if not missing_refs
+            else f"Rails has missing artifact references: {missing_refs[:5]}",
+            artifact_ref=RAILS_REF,
+        )
+    )
+    failures.extend(f"rails.json references missing artifact: {ref}" for ref in missing_refs)
+
+
 def _validate_citations(store: ArtifactStore, warnings: list[str]) -> None:
     chunk_manifest = store.course_path("source_index/chunk_manifest.json")
     if not chunk_manifest.exists():
@@ -349,6 +431,7 @@ def _artifact_counts(store: ArtifactStore) -> dict[str, int]:
         "labs": len(list((store.root / "labs").glob("*.md"))),
         "lectures": len(list((store.root / "lectures").rglob("*.md"))),
         "quizzes": len(list((store.root / "quizzes").glob("*.md"))),
+        "rails": 1 if store.course_path(RAILS_REF).is_file() else 0,
         "rubrics": len(list((store.root / "rubrics").glob("*.md"))),
         "vr_lecture_cues": len(
             list((store.root / "vr_handoff" / "lecture_scene_cues").glob("*.json"))
@@ -365,3 +448,40 @@ def _warnings_markdown(report: ValidationReport) -> str:
     if not report.failures and not report.warnings:
         lines.append("No warnings or failures.")
     return "\n".join(lines) + "\n"
+
+
+def _missing_rails_refs(store: ArtifactStore, rails: Any) -> list[str]:
+    missing: list[str] = []
+    for ref in _rails_path_refs(rails):
+        try:
+            path = store.course_path(ref)
+        except ValueError:
+            missing.append(ref)
+            continue
+        if not path.exists():
+            missing.append(ref)
+    return sorted(set(missing))
+
+
+def _rails_path_refs(value: Any) -> list[str]:
+    refs: list[str] = []
+    if isinstance(value, dict):
+        for key, child in value.items():
+            if _is_rails_path_key(str(key)) and isinstance(child, str):
+                refs.append(child)
+            else:
+                refs.extend(_rails_path_refs(child))
+    elif isinstance(value, list):
+        for item in value:
+            refs.extend(_rails_path_refs(item))
+    return refs
+
+
+def _is_rails_path_key(key: str) -> bool:
+    return key.endswith("_ref") or key in {
+        "approved_blueprint",
+        "blueprint",
+        "manifest",
+        "path",
+        "schedule",
+    }

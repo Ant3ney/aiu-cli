@@ -15,6 +15,7 @@ from aiu.assessment_generation import (
 )
 from aiu.context_research import ContextResearchError, research_context
 from aiu.course_materials import CourseMaterialError, generate_syllabus_artifacts
+from aiu.course_rails import CourseRailsError, generate_course_rails
 from aiu.lab_generation import (
     LabGenerationError,
     complete_lab_stage_if_ready,
@@ -81,7 +82,11 @@ def generate_course(
             raise GenerationError("--from and --to must be supplied together.")
         try:
             artifacts = regenerate_week_range(course_root, from_ref, to_ref, progress=progress)
+            if store.course_path("rails.json").exists():
+                artifacts.extend(generate_course_rails(course_root, progress=progress))
         except RegenerationError as exc:
+            raise GenerationError(str(exc)) from exc
+        except CourseRailsError as exc:
             raise GenerationError(str(exc)) from exc
         return {
             "artifacts": artifacts,
@@ -139,6 +144,19 @@ def generate_course(
             "artifacts": artifacts,
             "dry_run": False,
             "message": f"Generated assessments stage with {len(artifacts)} artifact(s).",
+            "stage": selected_stage,
+            "status": "complete",
+        }
+
+    if selected_stage == "rails":
+        try:
+            artifacts = generate_course_rails(course_root, progress=progress)
+        except CourseRailsError as exc:
+            raise GenerationError(str(exc)) from exc
+        return {
+            "artifacts": artifacts,
+            "dry_run": False,
+            "message": f"Generated rails stage with {len(artifacts)} artifact(s).",
             "stage": selected_stage,
             "status": "complete",
         }
@@ -232,4 +250,8 @@ def _generate_chronological_course(
     complete_lecture_stage_if_ready(course_root)
     complete_lab_stage_if_ready(course_root)
     complete_assessment_stage_if_ready(course_root)
+    try:
+        artifacts.extend(generate_course_rails(course_root, progress=progress))
+    except CourseRailsError as exc:
+        raise GenerationError(str(exc)) from exc
     return artifacts

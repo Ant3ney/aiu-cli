@@ -229,6 +229,16 @@ aiu course validate ./courses/ai
 aiu course export ./courses/ai --format markdown,json,vr
 ```
 
+Full course generation also writes `rails.json` at the course root. This is a
+deterministic runtime contract for non-AI code: it catalogs generated artifacts,
+keeps all paths relative to the course folder, and provides an ordered
+day-by-day teaching plan with action types such as loading content, presenting a
+lecture transcript, playing scene cues, running labs or activities, and handling
+assessments.
+If you manually generate individual stages instead of using the default full
+generation flow, run `aiu course generate <course-folder> --stage rails` after
+the content stages and before validation or export.
+
 For staged work:
 
 ```bash

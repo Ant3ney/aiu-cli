@@ -516,7 +516,10 @@ def course_approve(course_root: str) -> None:
 )
 @click.option(
     "--stage",
-    type=click.Choice(["all", "syllabus", "lectures", "labs", "assessments"], case_sensitive=False),
+    type=click.Choice(
+        ["all", "syllabus", "lectures", "labs", "assessments", "rails"],
+        case_sensitive=False,
+    ),
     help="Generate a single stage.",
 )
 @click.option(

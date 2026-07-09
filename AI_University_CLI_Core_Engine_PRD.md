@@ -344,6 +344,7 @@ course-root/
   prompt.md
   course_blueprint.md
   course_blueprint.json
+  rails.json
   schedule.json
   source_manifest.json
   ingest_report.json

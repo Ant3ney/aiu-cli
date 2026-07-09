@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from aiu.artifact_store import ArtifactStore
+from aiu.course_rails import CourseRailsError, generate_course_rails
 from aiu.project import update_manifest_artifacts
 from aiu.state import complete_stage, start_stage
 
@@ -24,6 +25,11 @@ def export_course(course_root: str | Path, formats: str) -> list[str]:
     store = ArtifactStore(course_root)
     start_stage(course_root, "export")
     artifacts: list[str] = []
+    if requested & {"json", "vr"} and not store.course_path("rails.json").exists():
+        try:
+            generate_course_rails(course_root)
+        except CourseRailsError as exc:
+            raise ExportError(str(exc)) from exc
 
     if "markdown" in requested:
         artifacts.extend(_export_markdown(store))
@@ -103,6 +109,7 @@ def _export_json(store: ArtifactStore) -> list[str]:
         "course_blueprint.json",
         "approved_course_blueprint.json",
         "approval_metadata.json",
+        "rails.json",
         "schedule.json",
         "validation_report.json",
     ]
@@ -130,6 +137,10 @@ def _export_vr(store: ArtifactStore) -> list[str]:
     store.write_json("vr_handoff/course_runtime_manifest.json", runtime_manifest)
     store.write_json("exports/vr/course_runtime_manifest.json", runtime_manifest)
     artifacts.append("exports/vr/course_runtime_manifest.json")
+    rails_path = store.course_path("rails.json")
+    if rails_path.exists():
+        _copy_file(rails_path, store.course_path("exports/vr/rails.json"))
+        artifacts.append("exports/vr/rails.json")
 
     for cue_root_name in ("lecture_scene_cues", "lab_scene_cues"):
         cue_root = store.root / "vr_handoff" / cue_root_name
@@ -156,6 +167,7 @@ def _runtime_manifest(store: ArtifactStore) -> dict[str, Any]:
         "lab_scene_cues": lab_cues,
         "lecture_scene_cues": lecture_cues,
         "redacted_absolute_paths": True,
+        "rails_ref": "rails.json",
         "schedule_ref": "schedule.json",
         "version": 1,
     }

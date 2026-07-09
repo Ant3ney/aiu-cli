@@ -21,6 +21,7 @@ STAGE_ORDER = (
     "lectures",
     "labs",
     "assessments",
+    "rails",
     "validation",
     "export",
 )

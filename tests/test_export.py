@@ -54,12 +54,15 @@ def test_course_export_creates_requested_formats_and_vr_manifest(tmp_path: Path)
     assert (course_root / "exports" / "markdown").is_dir()
     assert (course_root / "exports" / "json").is_dir()
     assert (course_root / "exports" / "vr").is_dir()
+    assert (course_root / "exports" / "json" / "rails.json").is_file()
+    assert (course_root / "exports" / "vr" / "rails.json").is_file()
     assert (course_root / "vr_handoff" / "course_runtime_manifest.json").is_file()
 
     runtime_manifest = json.loads(
         (course_root / "vr_handoff" / "course_runtime_manifest.json").read_text(encoding="utf-8")
     )
     assert runtime_manifest["lecture_scene_cues"]
+    assert runtime_manifest["rails_ref"] == "rails.json"
     first_cue = runtime_manifest["lecture_scene_cues"][0]["path"]
     assert (course_root / first_cue).is_file()
 
