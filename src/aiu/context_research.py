@@ -116,6 +116,24 @@ STOPWORDS = {
     "you",
 }
 
+NOISY_SOURCE_MARKERS = (
+    "package-lock.json",
+    "/translations/",
+    "/node_modules/",
+    "/vendor/",
+    "help_system.c",
+    "json.hpp",
+)
+
+TYPO_REPLACEMENTS = {
+    "soucce": "source",
+    "tecnical": "technical",
+    "technial": "technical",
+    "undersand": "understand",
+    "courese": "course",
+    "prevview": "preview",
+}
+
 
 class ContextResearchError(ValueError):
     """Raised when source research cannot be generated."""
@@ -248,7 +266,7 @@ def source_refs_from_research(store: ArtifactStore) -> list[str]:
     refs = [
         str(source.get("source_ref", ""))
         for source in research.get("key_sources", [])
-        if source.get("source_ref")
+        if source.get("source_ref") and not _is_noisy_source_ref(str(source.get("source_ref", "")))
     ]
     if refs:
         return _unique(refs)
@@ -605,7 +623,7 @@ def _research_summary(
     key_sources: list[dict[str, Any]],
     source_modules: list[dict[str, Any]],
 ) -> str:
-    prompt_label = content_snippet(prompt, max_chars=140) or "the requested course"
+    prompt_label = content_snippet(_copyedit_text(prompt), max_chars=140) or "the requested course"
     terms = ", ".join(top_terms[:8]) if top_terms else "source-grounded details"
     sources = ", ".join(source["source_ref"] for source in key_sources[:4]) or "local sources"
     modules = ", ".join(module["name"] for module in source_modules[:4]) or "source modules"
@@ -785,6 +803,8 @@ def _chunk_score(
     score = len(term_set)
     score += 5 * len(term_set & prompt_terms)
     source_lower = source_ref.lower()
+    if _is_noisy_source_ref(source_ref):
+        score -= 40
     if any(marker in source_lower for marker in ("readme", "docs/", "doc/", "overview")):
         score += 8
     if any(marker in source_lower for marker in ("src/", "source/", "server/", "client/", "data/")):
@@ -859,7 +879,7 @@ def _source_refs_from_chunk_manifest(store: ArtifactStore) -> list[str]:
         {
             str(chunk["source_ref"]).split("!", maxsplit=1)[0]
             for chunk in chunk_manifest.get("chunks", [])
-            if chunk.get("source_ref")
+            if chunk.get("source_ref") and not _is_noisy_source_ref(str(chunk["source_ref"]))
         }
     )
 
@@ -918,6 +938,18 @@ def _module_id(module_key: str) -> str:
 
 def _terms(text: str) -> set[str]:
     return set(_top_terms(text, limit=200))
+
+
+def _is_noisy_source_ref(source_ref: str) -> bool:
+    normalized = source_ref.replace("\\", "/").lower()
+    return any(marker in normalized for marker in NOISY_SOURCE_MARKERS)
+
+
+def _copyedit_text(text: str) -> str:
+    updated = str(text)
+    for typo, replacement in TYPO_REPLACEMENTS.items():
+        updated = re.sub(rf"\b{re.escape(typo)}\b", replacement, updated, flags=re.IGNORECASE)
+    return updated
 
 
 def _top_terms(text: str, *, limit: int = 16) -> list[str]:

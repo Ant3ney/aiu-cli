@@ -6,6 +6,11 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
+from aiu.config import CourseSettings
+from aiu.planning import _blueprint_from_provider_payload
+
 
 def run_aiu(
     *args: str,
@@ -148,6 +153,36 @@ def test_course_plan_uses_configured_codex_provider_without_api_key(tmp_path: Pa
     intent = json.loads((course_root / "intent_analysis.json").read_text(encoding="utf-8"))
     assert intent["provider"] == "codex"
     assert intent["provider_plan_seed"] == "Codex planning guidance"
+
+
+def test_provider_context_blueprint_requires_week_source_focus() -> None:
+    payload = {
+        "course_title": "Source-Grounded Systems",
+        "description": "A source-grounded course.",
+        "outcomes": [
+            "Explain the source architecture.",
+            "Use concrete source examples.",
+            "Compare system tradeoffs.",
+        ],
+        "weeks": [
+            {
+                "week": 1,
+                "title": "Battle Simulator Internals",
+                "topics": ["Battle state", "Data hooks", "Turn flow"],
+                "lecture_titles": ["Battle State From Source"],
+            }
+        ],
+    }
+
+    with pytest.raises(ValueError, match="source_focus"):
+        _blueprint_from_provider_payload(
+            payload,
+            subject="source systems",
+            settings=CourseSettings(weeks=1, lectures_per_week=1),
+            feedback_priorities=[],
+            context_research={},
+            raw_prompt="Teach source systems",
+        )
 
 
 def write_fake_codex(tmp_path: Path) -> Path:

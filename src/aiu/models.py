@@ -121,6 +121,7 @@ class WeekPlan(AIUModel):
     title: str = Field(min_length=1)
     topics: list[str] = Field(min_length=1)
     lecture_titles: list[str] = Field(min_length=1)
+    source_focus: list[str] = Field(default_factory=list)
     lab: str | None = None
     assessments: list[str] = Field(default_factory=list)
 

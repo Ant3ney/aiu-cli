@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 from pathlib import Path
@@ -54,6 +55,24 @@ _FEEDBACK_STOPWORDS = {
     "want",
     "with",
 }
+
+_TYPO_REPLACEMENTS = {
+    "soucce": "source",
+    "tecnical": "technical",
+    "technial": "technical",
+    "undersand": "understand",
+    "courese": "course",
+    "prevview": "preview",
+}
+
+_NOISY_SOURCE_MARKERS = (
+    "package-lock.json",
+    "/translations/",
+    "/node_modules/",
+    "/vendor/",
+    "help_system.c",
+    "json.hpp",
+)
 
 
 def plan_course(
@@ -138,12 +157,14 @@ def plan_course(
             detail=f"{len(feedback_priorities)} requested coverage item(s)",
             snippet=content_snippet("; ".join(feedback_priorities)),
         )
-    provider_plan_seed = _provider_plan_seed(
-        prompt=prompt,
-        settings=settings,
-        feedback=feedback,
-        context_research=context_research,
-    )
+    provider_plan_seed = None
+    if not context_research:
+        provider_plan_seed = _provider_plan_seed(
+            prompt=prompt,
+            settings=settings,
+            feedback=feedback,
+            context_research=context_research,
+        )
     if provider_plan_seed:
         emit_progress(
             progress,
@@ -160,7 +181,23 @@ def plan_course(
         context_research=context_research,
         provider_plan_seed=provider_plan_seed,
     )
-    blueprint = _blueprint_from_intent(intent, settings)
+    if context_research:
+        blueprint = _blueprint_from_context_research(
+            prompt=prompt,
+            subject=subject,
+            settings=settings,
+            feedback=feedback,
+            feedback_priorities=feedback_priorities,
+            context_research=context_research,
+            progress=progress,
+        )
+        intent["curriculum_strategy"] = (
+            "provider_research_blueprint"
+            if settings.provider != ProviderName.FAKE
+            else "deterministic_research_blueprint"
+        )
+    else:
+        blueprint = _blueprint_from_intent(intent, settings)
     schedule = _schedule_from_blueprint(manifest.course_id, blueprint, settings)
 
     store.write_json("intent_analysis.json", intent)
@@ -201,11 +238,28 @@ def _blueprint_preview(blueprint: CourseBlueprint) -> str:
 
 
 def _subject_from_prompt(prompt: str) -> str:
-    text = " ".join(prompt.strip().split())
-    text = re.sub(r"^(teach|help|show)\s+me\s+", "", text, flags=re.IGNORECASE)
+    text = _copyedit_text(" ".join(prompt.strip().split()))
+    text = re.split(r"\bIn the context\b|\bUsing the context\b", text, maxsplit=1)[0]
+    text = re.split(r"[.?!]\s+", text, maxsplit=1)[0]
+    text = re.sub(
+        r"^(teach|help|show)\s+me\s+(to\s+)?(understand|learn)?\s*",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
     text = re.sub(r"^(learn|understand)\s+", "", text, flags=re.IGNORECASE)
     text = text.strip(" .?!")
-    return text or "the requested subject"
+    text = re.sub(r"\barchitecture\s+architecture\b", "architecture", text, flags=re.IGNORECASE)
+    if re.search(r"creature[- ]collector", text, flags=re.IGNORECASE):
+        return "technical architecture of data-driven creature-collector RPGs"
+    return content_snippet(text, max_chars=90) or "the requested subject"
+
+
+def _copyedit_text(text: str) -> str:
+    updated = str(text)
+    for typo, replacement in _TYPO_REPLACEMENTS.items():
+        updated = re.sub(rf"\b{re.escape(typo)}\b", replacement, updated, flags=re.IGNORECASE)
+    return updated
 
 
 def _intent_analysis(
@@ -314,6 +368,258 @@ def _blueprint_from_intent(intent: dict[str, Any], settings: CourseSettings) -> 
         lab_policy=settings.lab_policy,
         lab_policy_rationale=_lab_policy_rationale(settings.lab_policy),
         source_usage_plan=source_usage_plan,
+    )
+
+
+def _blueprint_from_context_research(
+    *,
+    prompt: str,
+    subject: str,
+    settings: CourseSettings,
+    feedback: str,
+    feedback_priorities: list[str],
+    context_research: dict[str, Any],
+    progress: ProgressCallback | None,
+) -> CourseBlueprint:
+    if settings.provider != ProviderName.FAKE:
+        blueprint = _provider_research_blueprint(
+            prompt=prompt,
+            subject=subject,
+            settings=settings,
+            feedback=feedback,
+            feedback_priorities=feedback_priorities,
+            context_research=context_research,
+            progress=progress,
+        )
+    else:
+        blueprint = _deterministic_research_blueprint(
+            subject=subject,
+            settings=settings,
+            feedback_priorities=feedback_priorities,
+            context_research=context_research,
+        )
+    return blueprint
+
+
+def _deterministic_research_blueprint(
+    *,
+    subject: str,
+    settings: CourseSettings,
+    feedback_priorities: list[str],
+    context_research: dict[str, Any],
+) -> CourseBlueprint:
+    modules = _curriculum_modules_from_research(context_research)
+    if not modules:
+        return _blueprint_from_intent(
+            {
+                "subject": subject,
+                "feedback_priorities": feedback_priorities,
+                "research_priorities": [],
+                "context_research": _research_intent_context(context_research),
+            },
+            settings,
+        )
+
+    outcomes = _research_outcomes(subject, context_research, feedback_priorities)
+    weeks: list[WeekPlan] = []
+    for week in range(1, settings.weeks + 1):
+        module = modules[(week - 1) % len(modules)]
+        week_focus = _week_focus_from_module(module, week=week)
+        lecture_titles = _lecture_titles_for_research_week(
+            week_focus,
+            lectures_per_week=settings.lectures_per_week,
+        )
+        lab = None
+        if settings.lab_policy == LabPolicy.ALWAYS:
+            lab = f"{week_focus['short']} source lab"
+        elif settings.lab_policy == LabPolicy.AUTO:
+            lab = f"{week_focus['short']} applied source workshop"
+        weeks.append(
+            WeekPlan(
+                week=week,
+                title=str(week_focus["title"]),
+                topics=list(week_focus["topics"]),
+                lecture_titles=lecture_titles,
+                source_focus=list(week_focus["source_focus"]),
+                lab=lab,
+                assessments=[
+                    f"homework_w{week:02d}",
+                    f"quiz_w{week:02d}" if week % 2 == 0 else "",
+                ],
+            )
+        )
+
+    course_modules = _course_modules_from_research_modules(modules, settings.weeks, outcomes)
+    return CourseBlueprint(
+        course_title=f"{subject.title()}: AI University Course",
+        description=_research_description(subject, context_research),
+        target_learner=settings.level,
+        outcomes=outcomes,
+        prerequisites=_prerequisites(settings.level),
+        modules=course_modules,
+        week_plan=weeks,
+        assessment_plan=_assessment_plan(outcomes, settings),
+        lab_policy=settings.lab_policy,
+        lab_policy_rationale=_lab_policy_rationale(settings.lab_policy),
+        source_usage_plan=_source_usage_plan_from_research(
+            context_research,
+            feedback_priorities=feedback_priorities,
+        ),
+    )
+
+
+def _provider_research_blueprint(
+    *,
+    prompt: str,
+    subject: str,
+    settings: CourseSettings,
+    feedback: str,
+    feedback_priorities: list[str],
+    context_research: dict[str, Any],
+    progress: ProgressCallback | None,
+) -> CourseBlueprint:
+    auth_config = AuthStore().load().providers.get(settings.provider)
+    if auth_config is None:
+        raise PlanningError(
+            f"Provider '{settings.provider.value}' is not configured. "
+            f"Run `aiu auth login --provider {settings.provider.value}` first."
+        )
+    provider = provider_for_name(
+        settings.provider,
+        api_key_env=auth_config.api_key_env,
+        codex_command=auth_config.codex_command,
+    )
+    validation_errors: list[str] = []
+    for attempt in range(1, 3):
+        emit_progress(
+            progress,
+            "blueprint",
+            "Requesting research-authored curriculum blueprint",
+            current=attempt,
+            total=2,
+            detail=(
+                "Provider must return validated JSON grounded in context_research.md."
+            ),
+        )
+        try:
+            result = provider.generate(
+                GenerationRequest(
+                    prompt=_provider_research_blueprint_prompt(
+                        prompt=prompt,
+                        subject=subject,
+                        settings=settings,
+                        feedback=feedback,
+                        context_research=context_research,
+                        validation_errors=validation_errors,
+                    ),
+                    purpose="context_research_blueprint",
+                    system_prompt=(
+                        "You are AI University's curriculum architect. Build the course "
+                        "from source research, not from generic templates. Return JSON only."
+                    ),
+                    max_retries=2,
+                )
+            )
+            payload = _json_object_from_provider_text(result.text)
+            blueprint = _blueprint_from_provider_payload(
+                payload,
+                subject=subject,
+                settings=settings,
+                feedback_priorities=feedback_priorities,
+                context_research=context_research,
+                raw_prompt=prompt,
+            )
+        except (ProviderError, TypeError, ValueError) as exc:
+            validation_errors = [str(exc)]
+            continue
+        emit_progress(
+            progress,
+            "blueprint",
+            "Accepted research-authored curriculum blueprint",
+            detail=blueprint.course_title,
+        )
+        return blueprint
+    raise PlanningError(
+        "Provider failed to return a valid research-authored curriculum blueprint: "
+        + "; ".join(validation_errors)
+    )
+
+
+def _blueprint_from_provider_payload(
+    payload: dict[str, Any],
+    *,
+    subject: str,
+    settings: CourseSettings,
+    feedback_priorities: list[str],
+    context_research: dict[str, Any],
+    raw_prompt: str,
+) -> CourseBlueprint:
+    course_title = _required_clean_string(payload, "course_title")
+    description = _required_clean_string(payload, "description")
+    outcomes = _required_string_list(payload, "outcomes", min_items=3)
+    prerequisites = _optional_string_list(payload.get("prerequisites"))
+    raw_weeks = payload.get("weeks", payload.get("week_plan"))
+    if not isinstance(raw_weeks, list) or len(raw_weeks) != settings.weeks:
+        raise ValueError(f"Expected exactly {settings.weeks} week plan item(s).")
+
+    weeks: list[WeekPlan] = []
+    for expected_week, raw_week in enumerate(raw_weeks, start=1):
+        if not isinstance(raw_week, dict):
+            raise ValueError(f"Week {expected_week} must be an object.")
+        week_number = int(raw_week.get("week", expected_week))
+        if week_number != expected_week:
+            raise ValueError(f"Week plan must be sequential; expected week {expected_week}.")
+        lecture_titles = _required_string_list(
+            raw_week,
+            "lecture_titles",
+            min_items=settings.lectures_per_week,
+        )
+        if len(lecture_titles) != settings.lectures_per_week:
+            raise ValueError(
+                f"Week {expected_week} must include exactly "
+                f"{settings.lectures_per_week} lecture title(s)."
+            )
+        source_focus = _required_string_list(raw_week, "source_focus", min_items=1)
+        weeks.append(
+            WeekPlan(
+                week=expected_week,
+                title=_required_clean_string(raw_week, "title"),
+                topics=_required_string_list(raw_week, "topics", min_items=3)[:6],
+                lecture_titles=lecture_titles,
+                source_focus=source_focus[:8],
+                lab=_optional_clean_string(raw_week.get("lab")),
+                assessments=[
+                    f"homework_w{expected_week:02d}",
+                    f"quiz_w{expected_week:02d}" if expected_week % 2 == 0 else "",
+                ],
+            )
+        )
+
+    if _blueprint_contains_prompt_leak(
+        course_title=course_title,
+        description=description,
+        outcomes=outcomes,
+        weeks=weeks,
+        raw_prompt=raw_prompt,
+    ):
+        raise ValueError("Provider curriculum copied raw prompt text or prompt typos.")
+
+    modules = _provider_modules_or_default(payload, settings.weeks, outcomes, subject)
+    return CourseBlueprint(
+        course_title=course_title,
+        description=description,
+        target_learner=settings.level,
+        outcomes=outcomes,
+        prerequisites=prerequisites or _prerequisites(settings.level),
+        modules=modules,
+        week_plan=weeks,
+        assessment_plan=_assessment_plan(outcomes, settings),
+        lab_policy=settings.lab_policy,
+        lab_policy_rationale=_lab_policy_rationale(settings.lab_policy),
+        source_usage_plan=_source_usage_plan_from_research(
+            context_research,
+            feedback_priorities=feedback_priorities,
+        ),
     )
 
 
@@ -537,6 +843,435 @@ def _research_priorities(context_research: dict[str, Any]) -> list[str]:
                 content_snippet(f"{source_ref} chunk {chunk_id} ({terms})", max_chars=140)
             )
     return priorities[:12]
+
+
+def _curriculum_modules_from_research(context_research: dict[str, Any]) -> list[dict[str, Any]]:
+    modules: list[dict[str, Any]] = []
+    for module in context_research.get("source_modules", []):
+        if not isinstance(module, dict):
+            continue
+        name = str(module.get("name", "")).strip()
+        if not name or _is_noisy_source_ref(name):
+            continue
+        modules.append(module)
+    return modules[:12]
+
+
+def _week_focus_from_module(module: dict[str, Any], *, week: int) -> dict[str, Any]:
+    name = str(module.get("name", "source module"))
+    terms = [str(term) for term in module.get("top_terms", []) if str(term).strip()]
+    clean_terms = [term for term in terms if term not in {"master", "pokemon", "pokefirered"}]
+    source_refs = [
+        str(source_ref)
+        for source_ref in module.get("source_refs", [])
+        if str(source_ref).strip() and not _is_noisy_source_ref(str(source_ref))
+    ][:4]
+    topic_basis = clean_terms[:4] or terms[:4] or ["source architecture", "system behavior"]
+    title = _title_from_source_module(name, topic_basis, week=week)
+    return {
+        "short": _short_source_label(name),
+        "title": title,
+        "topics": _topics_from_source_module(name, topic_basis),
+        "source_focus": _source_focus_entries(name, source_refs, module),
+    }
+
+
+def _title_from_source_module(name: str, terms: list[str], *, week: int) -> str:
+    if "pokemon-showdown-master/data" in name:
+        return "Showdown Data Model, Dex Tables, and Versioned Battle Content"
+    if "pokemon-showdown-master/sim" in name:
+        return "Showdown Simulator Internals, Turn Flow, and Deterministic Battle State"
+    if "pokemon-showdown-master/test" in name:
+        return "Executable Battle Specifications Through Showdown Tests"
+    if "pokemon-showdown-master/server" in name:
+        return "Showdown Server Boundary Around the Battle Simulator"
+    if "pokefirered-master/data" in name:
+        return "FireRed Overworld Data: Maps, Layouts, Warps, and Progression Records"
+    if "pokefirered-master/src" in name:
+        return "FireRed Engine Source: Battle Entry, Party State, Saves, and Systems"
+    if "pokefirered-master/include" in name:
+        return "FireRed Engine Interfaces, Constants, and Cross-System Contracts"
+    topic = ", ".join(terms[:3]) if terms else "source architecture"
+    return f"Source Architecture Studio {week}: {name} ({topic})"
+
+
+def _topics_from_source_module(name: str, terms: list[str]) -> list[str]:
+    if "pokemon-showdown-master/data" in name:
+        return [
+            "Dex data tables for species, moves, abilities, items, formes, and learnsets",
+            "Executable battle mechanics encoded as data records plus hook callbacks",
+            "Generation-specific mods and legality data as versioned content architecture",
+        ]
+    if "pokemon-showdown-master/sim" in name:
+        return [
+            "Battle, Side, Pokemon, Dex, queue, and PRNG responsibilities in the simulator",
+            "Turn resolution and battle protocol as deterministic state transitions",
+            "How simulator internals consume data-layer records and hooks",
+        ]
+    if "pokemon-showdown-master/test" in name:
+        return [
+            "Battle tests as executable rules documentation",
+            "Deterministic setup through createBattle, choices, assertions, and fixed state",
+            "Using tests to learn engine contracts before extending mechanics",
+        ]
+    if "pokemon-showdown-master/server" in name:
+        return [
+            "Rooms, users, chat commands, plugins, and moderation around battle simulation",
+            "Where multiplayer service responsibilities stop and simulator responsibilities begin",
+            "Operational boundaries for a production battle server",
+        ]
+    if "pokefirered-master/data" in name:
+        return [
+            "Map layouts, warps, object events, coordinate triggers, and elevation records",
+            "Overworld progression as data interpreted by engine systems",
+            "How maps, encounters, trainer gates, and battle handoff fit together",
+        ]
+    if "pokefirered-master/src" in name:
+        return [
+            "C engine subsystems for battle setup, party state, summary screens, "
+            "saves, and link play",
+            "How decompiled source reveals full-game architecture beyond battle simulation",
+            "Stateful RPG implementation tradeoffs under GBA-era constraints",
+        ]
+    if "pokefirered-master/include" in name:
+        return [
+            "Header contracts, constants, structs, and externs as architecture documentation",
+            "Cross-system boundaries between battle, bag, field, party, and save systems",
+            "Using declarations to map engine ownership before reading implementation files",
+        ]
+    return [
+        f"Source-backed concept: {term}"
+        for term in (terms[:4] or ["source architecture", "system responsibilities"])
+    ]
+
+
+def _source_focus_entries(
+    name: str,
+    source_refs: list[str],
+    module: dict[str, Any],
+) -> list[str]:
+    entries = list(source_refs)
+    for chunk in module.get("representative_chunks", []):
+        if not isinstance(chunk, dict):
+            continue
+        source_ref = str(chunk.get("source_ref", "")).strip()
+        chunk_id = str(chunk.get("chunk_id", "")).strip()
+        if source_ref and chunk_id and not _is_noisy_source_ref(source_ref):
+            entries.append(f"{source_ref} chunk {chunk_id}")
+    if not entries:
+        entries.append(f"{name}: source module research notes")
+    return _unique_strings(entries)[:6]
+
+
+def _lecture_titles_for_research_week(
+    week_focus: dict[str, Any],
+    *,
+    lectures_per_week: int,
+) -> list[str]:
+    topics = list(week_focus["topics"])
+    titles: list[str] = []
+    for index in range(lectures_per_week):
+        topic = topics[index % len(topics)]
+        if index == 0:
+            titles.append(f"{week_focus['short']}: {topic}")
+        else:
+            titles.append(f"{week_focus['short']} Source Workshop: {topic}")
+    return titles
+
+
+def _course_modules_from_research_modules(
+    research_modules: list[dict[str, Any]],
+    week_count: int,
+    outcomes: list[str],
+) -> list[CourseModule]:
+    selected = research_modules[: min(6, max(1, len(research_modules)))]
+    modules: list[CourseModule] = []
+    for index, module in enumerate(selected):
+        start = index * week_count // len(selected) + 1
+        end = (index + 1) * week_count // len(selected)
+        weeks = list(range(start, max(start, end) + 1))
+        name = str(module.get("name", f"Source Module {index + 1}"))
+        modules.append(
+            CourseModule(
+                module_id=f"module_{index + 1:02d}",
+                title=f"Source Study: {name}",
+                weeks=weeks,
+                objectives=[outcomes[index % len(outcomes)]],
+                rationale=(
+                    "This module teaches directly from context_research.md source "
+                    "findings rather than from a generic curriculum template."
+                ),
+            )
+        )
+    return modules
+
+
+def _research_outcomes(
+    subject: str,
+    context_research: dict[str, Any],
+    feedback_priorities: list[str],
+) -> list[str]:
+    modules = _curriculum_modules_from_research(context_research)
+    module_names = [str(module.get("name", "")) for module in modules[:4]]
+    source_phrase = (
+        _summarize_priority_list(module_names, max_items=3)
+        if module_names
+        else "the supplied sources"
+    )
+    outcomes = [
+        f"Explain {subject} using concrete evidence from {source_phrase}.",
+        "Trace battle-system architecture from data tables through simulator behavior and tests.",
+        "Trace full RPG architecture from overworld data through engine source, "
+        "saves, and progression.",
+        "Compare Pokemon Showdown's simulator architecture with pokefirered's "
+        "decompiled full-game implementation.",
+    ]
+    if feedback_priorities:
+        outcomes.append(
+            "Address learner-requested coverage including "
+            f"{_summarize_priority_list(feedback_priorities, max_items=3)}."
+        )
+    return outcomes
+
+
+def _research_description(subject: str, context_research: dict[str, Any]) -> str:
+    synthesis = str(context_research.get("ai_research", {}).get("synthesis", "")).strip()
+    if synthesis:
+        return (
+            f"A source-grounded course in {subject}. It uses context_research.md to teach "
+            "the concrete technical design of the supplied projects, including battle "
+            "simulation, full-game implementation, overworld progression, and source-cited "
+            "architecture tradeoffs."
+        )
+    return (
+        f"A source-grounded course in {subject} that teaches directly from the supplied "
+        "context research, source modules, and citable chunks."
+    )
+
+
+def _source_usage_plan_from_research(
+    context_research: dict[str, Any],
+    *,
+    feedback_priorities: list[str],
+) -> list[str]:
+    plan = [
+        "Use context_research.md as the compact source-memory packet for every stage.",
+        "Teach concrete findings from the research notes; do not merely promise to "
+        "inspect sources later.",
+        "Cite source paths and chunk IDs from weekly source focus entries when making "
+        "source-backed claims.",
+    ]
+    plan.append(
+        "Context research reviewed "
+        f"{context_research.get('chunk_count', 0)} chunk(s) across "
+        f"{context_research.get('source_count', 0)} source file(s)."
+    )
+    for module in _curriculum_modules_from_research(context_research)[:8]:
+        plan.append(f"Curriculum source module: {module.get('name')}")
+    if feedback_priorities:
+        plan.extend(f"Learner feedback priority: {priority}" for priority in feedback_priorities)
+    return plan
+
+
+def _provider_research_blueprint_prompt(
+    *,
+    prompt: str,
+    subject: str,
+    settings: CourseSettings,
+    feedback: str,
+    context_research: dict[str, Any],
+    validation_errors: list[str],
+) -> str:
+    feedback_block = f"\nLearner feedback:\n{feedback.strip()}\n" if feedback.strip() else ""
+    retry_block = ""
+    if validation_errors:
+        retry_block = (
+            "\nYour previous response failed validation. Fix these issues:\n"
+            + "\n".join(f"- {error}" for error in validation_errors)
+            + "\n"
+        )
+    return (
+        "Create the actual AI University course blueprint from the source research.\n"
+        "The structure is deterministic, but the weekly content must be authored from "
+        "context_research.md and the AI research synthesis.\n\n"
+        f"Raw learning prompt, for intent only; do not copy wording or typos:\n{prompt}\n\n"
+        f"Canonical subject: {subject}\n"
+        f"Course length: {settings.weeks} weeks\n"
+        f"Lectures per week: {settings.lectures_per_week}\n"
+        f"Target learner: {settings.level}\n"
+        f"Lab policy: {settings.lab_policy.value}\n"
+        f"{feedback_block}"
+        f"{_provider_research_block(context_research)}"
+        f"{retry_block}\n"
+        "Return JSON only with this exact shape:\n"
+        "{\n"
+        '  "course_title": "concise corrected title",\n'
+        '  "description": "source-grounded course description",\n'
+        '  "outcomes": ["3-6 source-grounded learning outcomes"],\n'
+        '  "prerequisites": ["..."],\n'
+        '  "modules": [\n'
+        '    {"title": "...", "weeks": [1, 2], "objectives": ["..."], '
+        '"rationale": "..."}\n'
+        "  ],\n"
+        '  "weeks": [\n'
+        '    {"week": 1, "title": "specific researched system", '
+        '"topics": ["3-6 concrete concepts"], '
+        '"lecture_titles": ["exactly the configured count"], '
+        '"source_focus": ["source path and chunk ID or source path plus source-use note"], '
+        '"lab": "optional concrete lab/workshop"}\n'
+        "  ]\n"
+        "}\n\n"
+        "Rules:\n"
+        "- Do not include the raw prompt in any title, outcome, topic, or lecture title.\n"
+        "- Correct obvious spelling mistakes from the prompt.\n"
+        "- Do not use generic placeholder weeks like Foundations, Operations, or "
+        "Capstone unless they name concrete researched systems.\n"
+        "- Deliberately teach Pokemon Showdown battle architecture and pokefirered "
+        "full-game/overworld architecture when those sources appear in research.\n"
+        "- Every week must include source_focus entries from the research notes.\n"
+    )
+
+
+def _json_object_from_provider_text(text: str) -> dict[str, Any]:
+    stripped = text.strip()
+    stripped = re.sub(r"^```(?:json)?\s*", "", stripped)
+    stripped = re.sub(r"\s*```$", "", stripped)
+    start = stripped.find("{")
+    end = stripped.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        raise ValueError("Provider did not return a JSON object.")
+    try:
+        payload = json.loads(stripped[start : end + 1])
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Provider returned invalid JSON: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("Provider JSON root must be an object.")
+    return payload
+
+
+def _required_clean_string(payload: dict[str, Any], key: str) -> str:
+    value = _optional_clean_string(payload.get(key))
+    if not value:
+        raise ValueError(f"Missing required string field: {key}.")
+    return value
+
+
+def _optional_clean_string(value: Any) -> str | None:
+    if value is None:
+        return None
+    cleaned = _copyedit_text(" ".join(str(value).split())).strip()
+    return cleaned or None
+
+
+def _required_string_list(
+    payload: dict[str, Any],
+    key: str,
+    *,
+    min_items: int,
+) -> list[str]:
+    values = _optional_string_list(payload.get(key))
+    if len(values) < min_items:
+        raise ValueError(f"Field {key} must contain at least {min_items} item(s).")
+    return values
+
+
+def _optional_string_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError("Expected a list of strings.")
+    return [
+        cleaned
+        for item in value
+        if (cleaned := _optional_clean_string(item))
+    ]
+
+
+def _provider_modules_or_default(
+    payload: dict[str, Any],
+    week_count: int,
+    outcomes: list[str],
+    subject: str,
+) -> list[CourseModule]:
+    raw_modules = payload.get("modules")
+    modules: list[CourseModule] = []
+    if isinstance(raw_modules, list):
+        for index, raw_module in enumerate(raw_modules, start=1):
+            if not isinstance(raw_module, dict):
+                continue
+            title = _optional_clean_string(raw_module.get("title"))
+            raw_weeks = raw_module.get("weeks", [])
+            weeks = [
+                int(week)
+                for week in raw_weeks
+                if isinstance(week, int) and 1 <= int(week) <= week_count
+            ]
+            objectives = _optional_string_list(raw_module.get("objectives"))
+            rationale = _optional_clean_string(raw_module.get("rationale"))
+            if title and weeks and objectives and rationale:
+                modules.append(
+                    CourseModule(
+                        module_id=f"module_{index:02d}",
+                        title=title,
+                        weeks=weeks,
+                        objectives=objectives,
+                        rationale=rationale,
+                    )
+                )
+    if modules:
+        return modules
+    weeks = list(range(1, week_count + 1))
+    return _modules(subject, weeks, outcomes)
+
+
+def _blueprint_contains_prompt_leak(
+    *,
+    course_title: str,
+    description: str,
+    outcomes: list[str],
+    weeks: list[WeekPlan],
+    raw_prompt: str,
+) -> bool:
+    haystack = " ".join(
+        [
+            course_title,
+            description,
+            *outcomes,
+            *[
+                " ".join([week.title, *week.topics, *week.lecture_titles])
+                for week in weeks
+            ],
+        ]
+    ).lower()
+    if any(typo in haystack for typo in _TYPO_REPLACEMENTS):
+        return True
+    prompt_words = [word.lower() for word in re.findall(r"[A-Za-z]{4,}", raw_prompt)]
+    if len(prompt_words) < 12:
+        return False
+    phrase = " ".join(prompt_words[:12])
+    return phrase in haystack
+
+
+def _is_noisy_source_ref(source_ref: str) -> bool:
+    normalized = source_ref.replace("\\", "/").lower()
+    return any(marker in normalized for marker in _NOISY_SOURCE_MARKERS)
+
+
+def _short_source_label(source_ref: str) -> str:
+    normalized = source_ref.replace("\\", "/").strip("/")
+    if "pokemon-showdown-master" in normalized:
+        return normalized.replace("pokemon-showdown-master", "Pokemon Showdown")
+    if "pokefirered-master" in normalized:
+        return normalized.replace("pokefirered-master", "FireRed")
+    return normalized or "Source Module"
+
+
+def _unique_strings(values: list[str]) -> list[str]:
+    result: list[str] = []
+    for value in values:
+        if value and value not in result:
+            result.append(value)
+    return result
 
 
 def _curriculum_progression(subject: str, week_count: int) -> list[dict[str, Any]]:
@@ -790,6 +1525,8 @@ def _blueprint_markdown(blueprint: CourseBlueprint) -> str:
     for week in blueprint.week_plan:
         lines.append(f"- Week {week.week}: {week.title}")
         lines.append(f"  - Topics: {', '.join(week.topics)}")
+        if week.source_focus:
+            lines.append(f"  - Source focus: {'; '.join(week.source_focus)}")
     lines.extend(["", "## Assessment Plan"])
     for assessment in blueprint.assessment_plan:
         lines.append(

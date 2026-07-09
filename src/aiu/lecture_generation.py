@@ -786,7 +786,15 @@ def _week_context_for_prompt(blueprint: CourseBlueprint, week: int) -> str:
     lecture_titles = "; ".join(week_plan.lecture_titles)
     topics = "; ".join(week_plan.topics)
     lab = f" Lab or workshop: {week_plan.lab}." if week_plan.lab else ""
-    return f"{week_plan.title}. Topics: {topics}. Lectures this week: {lecture_titles}.{lab}"
+    source_focus = (
+        f" Source focus: {'; '.join(week_plan.source_focus)}."
+        if week_plan.source_focus
+        else ""
+    )
+    return (
+        f"{week_plan.title}. Topics: {topics}. Lectures this week: "
+        f"{lecture_titles}.{source_focus}{lab}"
+    )
 
 
 def _fake_lens(cycle: int) -> str:

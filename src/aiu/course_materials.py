@@ -164,6 +164,10 @@ def _syllabus_markdown(
     for week in blueprint.week_plan:
         lines.append(f"- Week {week.week}: {week.title}")
         lines.append(f"  - Topics: {', '.join(week.topics)}")
+        if week.lecture_titles:
+            lines.append(f"  - Lectures: {'; '.join(week.lecture_titles)}")
+        if week.source_focus:
+            lines.append(f"  - Source focus: {'; '.join(week.source_focus)}")
     lines.extend(["", "## Source Grounding"])
     if source_refs:
         lines.extend(f"- {source_ref}" for source_ref in source_refs)
