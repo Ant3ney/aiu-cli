@@ -10,6 +10,7 @@ from typing import Any
 from aiu.artifact_store import ArtifactStore
 from aiu.auth import AuthStore
 from aiu.config import CourseSettings, LabPolicy, ProviderName
+from aiu.context_research import ContextResearchError, research_context
 from aiu.feedback import read_course_feedback
 from aiu.logging import ProgressCallback, content_snippet, emit_progress
 from aiu.models import (
@@ -101,6 +102,24 @@ def plan_course(
 
     prompt = store.course_path(manifest.prompt_ref).read_text(encoding="utf-8")
     settings = manifest.settings
+    context_research: dict[str, Any] = {}
+    if store.course_path("source_index/chunk_manifest.json").exists():
+        try:
+            context_research = research_context(course_root, progress=progress)
+        except ContextResearchError as exc:
+            raise PlanningError(str(exc)) from exc
+        if context_research:
+            emit_progress(
+                progress,
+                "blueprint",
+                "Loaded context research notes for planning",
+                artifact="context_research.md",
+                detail=(
+                    f"{context_research.get('chunk_count', 0)} chunk(s), "
+                    f"{len(context_research.get('source_modules', []))} source module(s)"
+                ),
+                snippet=content_snippet(str(context_research.get("summary", ""))),
+            )
     subject = _subject_from_prompt(prompt)
     emit_progress(
         progress,
@@ -123,6 +142,7 @@ def plan_course(
         prompt=prompt,
         settings=settings,
         feedback=feedback,
+        context_research=context_research,
     )
     if provider_plan_seed:
         emit_progress(
@@ -137,6 +157,7 @@ def plan_course(
         settings=settings,
         feedback=feedback,
         feedback_priorities=feedback_priorities,
+        context_research=context_research,
         provider_plan_seed=provider_plan_seed,
     )
     blueprint = _blueprint_from_intent(intent, settings)
@@ -194,6 +215,7 @@ def _intent_analysis(
     settings: CourseSettings,
     feedback: str,
     feedback_priorities: list[str],
+    context_research: dict[str, Any],
     provider_plan_seed: str | None,
 ) -> dict[str, Any]:
     practical_balance = "applied" if settings.lab_policy != LabPolicy.NEVER else "conceptual"
@@ -213,6 +235,8 @@ def _intent_analysis(
         "feedback": feedback,
         "feedback_priorities": feedback_priorities,
         "feedback_keywords": _feedback_keywords(feedback_priorities),
+        "context_research": _research_intent_context(context_research),
+        "research_priorities": _research_priorities(context_research),
         "topic_keywords": _keywords(subject),
     }
     if provider_plan_seed:
@@ -224,6 +248,8 @@ def _blueprint_from_intent(intent: dict[str, Any], settings: CourseSettings) -> 
     subject = str(intent["subject"])
     title_subject = subject.title()
     feedback_priorities = [str(item) for item in intent.get("feedback_priorities", [])]
+    research_priorities = [str(item) for item in intent.get("research_priorities", [])]
+    research_context = intent.get("context_research", {})
     outcomes = [
         f"Explain foundational concepts in {subject}.",
         f"Apply {subject} methods to realistic problems.",
@@ -235,12 +261,18 @@ def _blueprint_from_intent(intent: dict[str, Any], settings: CourseSettings) -> 
             "Address learner-requested coverage including "
             f"{_summarize_priority_list(feedback_priorities, max_items=3)}."
         )
+    if research_priorities:
+        outcomes.append(
+            "Use source-grounded examples from the supplied context including "
+            f"{_summarize_priority_list(research_priorities, max_items=3)}."
+        )
     weeks = list(range(1, settings.weeks + 1))
     modules = _modules(subject, weeks, outcomes)
     progression = _apply_feedback_to_progression(
         _curriculum_progression(subject, settings.weeks),
         feedback_priorities,
     )
+    progression = _apply_research_to_progression(progression, research_priorities)
     week_plan = [
         _week_plan(subject, week, settings, focus=progression[week - 1])
         for week in weeks
@@ -248,8 +280,19 @@ def _blueprint_from_intent(intent: dict[str, Any], settings: CourseSettings) -> 
     assessment_plan = _assessment_plan(outcomes, settings)
     source_usage_plan = [
         "Use provided source chunks where available.",
+        "Read context_research.md before planning or generation and cite its source paths.",
         "Flag missing or unsupported source coverage before detailed generation.",
     ]
+    if research_context:
+        source_usage_plan.append(
+            "Context research reviewed "
+            f"{research_context.get('chunk_count', 0)} chunk(s) across "
+            f"{research_context.get('source_count', 0)} source file(s)."
+        )
+        source_usage_plan.extend(
+            f"Source-grounded module: {priority}"
+            for priority in research_priorities[:6]
+        )
     if feedback_priorities:
         source_usage_plan.extend(
             f"Learner feedback priority: {priority}" for priority in feedback_priorities
@@ -425,6 +468,75 @@ def _apply_feedback_to_progression(
         focus["topics"].append(f"learner-requested topic: {label}")
         focus["lecture_angles"].append(f"Requested coverage: {label}")
     return updated
+
+
+def _apply_research_to_progression(
+    progression: list[dict[str, Any]],
+    priorities: list[str],
+) -> list[dict[str, Any]]:
+    if not priorities or not progression:
+        return progression
+
+    updated = [
+        {
+            **focus,
+            "topics": list(focus["topics"]),
+            "lecture_angles": list(focus["lecture_angles"]),
+        }
+        for focus in progression
+    ]
+    for index, priority in enumerate(priorities[: len(updated)]):
+        target_index = min(len(updated) - 1, index * len(updated) // max(1, len(priorities)))
+        label = content_snippet(priority, max_chars=90)
+        focus = updated[target_index]
+        focus["topics"].append(f"source-grounded case: {label}")
+        focus["lecture_angles"].append(f"Source research case study: {label}")
+    return updated
+
+
+def _research_intent_context(context_research: dict[str, Any]) -> dict[str, Any]:
+    if not context_research:
+        return {}
+    return {
+        "ai_synthesis": content_snippet(
+            str(context_research.get("ai_research", {}).get("synthesis", "")),
+            max_chars=1000,
+        ),
+        "chunk_count": context_research.get("chunk_count", 0),
+        "key_sources": [
+            source.get("source_ref", "")
+            for source in context_research.get("key_sources", [])[:10]
+            if source.get("source_ref")
+        ],
+        "source_count": context_research.get("source_count", 0),
+        "source_modules": [
+            module.get("name", "")
+            for module in context_research.get("source_modules", [])[:10]
+            if module.get("name")
+        ],
+        "summary": context_research.get("summary", ""),
+        "top_terms": context_research.get("top_terms", [])[:16],
+    }
+
+
+def _research_priorities(context_research: dict[str, Any]) -> list[str]:
+    if not context_research:
+        return []
+    priorities: list[str] = []
+    for module in context_research.get("source_modules", [])[:8]:
+        name = str(module.get("name", "")).strip()
+        terms = ", ".join(module.get("top_terms", [])[:5])
+        if name:
+            priorities.append(content_snippet(f"{name} ({terms})", max_chars=140))
+    for chunk in context_research.get("idea_chunks", [])[:8]:
+        source_ref = str(chunk.get("source_ref", "")).strip()
+        chunk_id = str(chunk.get("chunk_id", "")).strip()
+        terms = ", ".join(chunk.get("terms", [])[:4])
+        if source_ref and chunk_id:
+            priorities.append(
+                content_snippet(f"{source_ref} chunk {chunk_id} ({terms})", max_chars=140)
+            )
+    return priorities[:12]
 
 
 def _curriculum_progression(subject: str, week_count: int) -> list[dict[str, Any]]:
@@ -707,6 +819,7 @@ def _provider_plan_seed(
     prompt: str,
     settings: CourseSettings,
     feedback: str,
+    context_research: dict[str, Any],
 ) -> str | None:
     if settings.provider == ProviderName.FAKE:
         return None
@@ -729,24 +842,49 @@ def _provider_plan_seed(
             "\n\nLearner feedback to incorporate into the course plan:\n"
             f"{feedback.strip()}"
         )
+    research_block = _provider_research_block(context_research)
     try:
         result = provider.generate(
             GenerationRequest(
                 prompt=(
                     "Create a concise planning note for a university-style course. "
-                    "Return plain text only, no markdown headings.\n\n"
-                    f"Learning prompt: {prompt}{feedback_block}"
+                    "Use the context research notes heavily. Return plain text only, "
+                    "no markdown headings.\n\n"
+                    f"Learning prompt: {prompt}{feedback_block}{research_block}"
                 ),
                 purpose="course_plan_seed",
                 system_prompt=(
                     "You are helping AI University turn a learning prompt into a "
-                    "course plan. Be concise and curriculum-focused."
+                    "course plan. Be concise, curriculum-focused, and strict about "
+                    "source-grounded coverage from context_research.md."
                 ),
             )
         )
     except ProviderError as exc:
         raise PlanningError(str(exc)) from exc
     return result.text
+
+
+def _provider_research_block(context_research: dict[str, Any]) -> str:
+    if not context_research:
+        return ""
+    lines = [
+        "",
+        "",
+        "Context research notes to enforce:",
+        f"Summary: {context_research.get('summary', '')}",
+        f"Top terms: {', '.join(context_research.get('top_terms', [])[:16])}",
+        "Key source modules:",
+    ]
+    for module in context_research.get("source_modules", [])[:8]:
+        lines.append(f"- {module.get('name')}: {module.get('notes')}")
+    lines.append("Key citable sources:")
+    for source in context_research.get("key_sources", [])[:8]:
+        lines.append(f"- {source.get('source_ref')}: {source.get('summary')}")
+    synthesis = str(context_research.get("ai_research", {}).get("synthesis", "")).strip()
+    if synthesis:
+        lines.extend(["AI research synthesis:", content_snippet(synthesis, max_chars=1200)])
+    return "\n".join(lines)
 
 
 def _lab_policy_rationale(lab_policy: LabPolicy) -> str:

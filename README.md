@@ -175,7 +175,16 @@ aiu course create "Teach me data-driven creature collector RPG design" \
 ```bash
 less ./courses/rpg/syllabus/syllabus.md
 less ./courses/rpg/course_blueprint.md
+less ./courses/rpg/context_research.md
 ```
+
+When local context is supplied, AIU now runs a source research pass before the
+blueprint or syllabus preview. It scans the extracted chunks, writes
+`context_research.md` and `source_index/context_research.json`, and uses those
+notes to ground the course plan, reading list, and later lecture prompts. With a
+real provider such as `codex` or `openai`, AIU also asks the provider to study
+compact source packets module by module and synthesize citation guidance for
+future course generation.
 
 3. If the plan is missing topics, add feedback. You can run this command more
 than once; each note is appended to `course_feedback.md`, then AIU regenerates

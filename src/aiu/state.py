@@ -14,6 +14,7 @@ STAGE_ORDER = (
     "project",
     "inputs",
     "context",
+    "research",
     "blueprint",
     "approval",
     "syllabus",

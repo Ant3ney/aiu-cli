@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from aiu.artifact_store import ArtifactStore
+from aiu.context_research import load_context_research, source_refs_from_research
 from aiu.logging import ProgressCallback, content_snippet, emit_progress
 from aiu.models import CourseBlueprint
 from aiu.project import update_manifest_artifacts
@@ -47,6 +48,7 @@ def generate_syllabus_artifacts(
 
     start_stage(course_root, "syllabus")
     blueprint = CourseBlueprint.model_validate(store.read_json("approved_course_blueprint.json"))
+    context_research = load_context_research(store)
     source_refs = _source_refs(store)
     emit_progress(
         progress,
@@ -55,10 +57,10 @@ def generate_syllabus_artifacts(
         detail=f"{blueprint.course_title}; {len(source_refs)} source reference(s)",
     )
 
-    syllabus = _syllabus_markdown(blueprint, source_refs)
+    syllabus = _syllabus_markdown(blueprint, source_refs, context_research)
     grading_policy = _grading_policy_markdown(blueprint)
-    reading_list = _reading_list_markdown(source_refs)
-    course_overview = _course_overview_markdown(blueprint)
+    reading_list = _reading_list_markdown(source_refs, context_research)
+    course_overview = _course_overview_markdown(blueprint, context_research)
 
     _write_markdown_with_progress(
         store,
@@ -126,6 +128,9 @@ def _write_markdown_with_progress(
 
 
 def _source_refs(store: ArtifactStore) -> list[str]:
+    researched_refs = source_refs_from_research(store)
+    if researched_refs:
+        return researched_refs
     chunk_manifest_path = store.course_path("source_index/chunk_manifest.json")
     if not chunk_manifest_path.exists():
         return []
@@ -138,7 +143,11 @@ def _source_refs(store: ArtifactStore) -> list[str]:
     return sorted(refs)
 
 
-def _syllabus_markdown(blueprint: CourseBlueprint, source_refs: list[str]) -> str:
+def _syllabus_markdown(
+    blueprint: CourseBlueprint,
+    source_refs: list[str],
+    context_research: dict[str, Any],
+) -> str:
     lines = [
         f"# {blueprint.course_title}",
         "",
@@ -160,6 +169,15 @@ def _syllabus_markdown(blueprint: CourseBlueprint, source_refs: list[str]) -> st
         lines.extend(f"- {source_ref}" for source_ref in source_refs)
     else:
         lines.append("- No local source chunks were provided for this course.")
+    if context_research:
+        lines.extend(["", "## Context Research Notes"])
+        lines.append("- Required source-memory packet: context_research.md")
+        lines.append(f"- {context_research.get('summary', '')}")
+        for module in context_research.get("source_modules", [])[:6]:
+            lines.append(
+                f"- Source module: {module.get('name')} - "
+                f"{content_snippet(str(module.get('notes', '')), max_chars=180)}"
+            )
     return "\n".join(lines) + "\n"
 
 
@@ -182,8 +200,23 @@ def _grading_policy_markdown(blueprint: CourseBlueprint) -> str:
     )
 
 
-def _reading_list_markdown(source_refs: list[str]) -> str:
+def _reading_list_markdown(source_refs: list[str], context_research: dict[str, Any]) -> str:
     lines = ["# Reading List", ""]
+    if context_research:
+        lines.extend(
+            [
+                "## Source Research Packet",
+                "- context_research.md",
+                "",
+                "## High-Value Source Chunks",
+            ]
+        )
+        for chunk in context_research.get("idea_chunks", [])[:12]:
+            lines.append(
+                f"- {chunk.get('source_ref')} (chunk {chunk.get('chunk_id')}): "
+                f"{chunk.get('summary')}"
+            )
+        lines.append("")
     if source_refs:
         lines.append("## Provided Sources")
         lines.extend(f"- {source_ref}" for source_ref in source_refs)
@@ -200,7 +233,7 @@ def _reading_list_markdown(source_refs: list[str]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _course_overview_markdown(blueprint: CourseBlueprint) -> str:
+def _course_overview_markdown(blueprint: CourseBlueprint, context_research: dict[str, Any]) -> str:
     lines = [
         f"# Course Overview: {blueprint.course_title}",
         "",
@@ -210,6 +243,10 @@ def _course_overview_markdown(blueprint: CourseBlueprint) -> str:
     ]
     for module in blueprint.modules:
         lines.append(f"- {module.title}: weeks {min(module.weeks)}-{max(module.weeks)}")
+    if context_research:
+        lines.extend(["", "## Source-Grounded Modules"])
+        for module in context_research.get("source_modules", [])[:8]:
+            lines.append(f"- {module.get('name')}: {module.get('notes')}")
     lines.extend(["", "## Assessment Strategy"])
     for assessment in blueprint.assessment_plan:
         lines.append(f"- {assessment.assessment_id}: due week {assessment.due_week}")

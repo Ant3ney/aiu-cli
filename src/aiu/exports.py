@@ -53,6 +53,12 @@ def _parse_formats(formats: str) -> set[str]:
 
 def _export_markdown(store: ArtifactStore) -> list[str]:
     artifacts: list[str] = []
+    for relative in ("context_research.md",):
+        source_path = store.course_path(relative)
+        if source_path.exists():
+            target_relative = f"exports/markdown/{relative}"
+            _copy_file(source_path, store.course_path(target_relative))
+            artifacts.append(target_relative)
     roots = [
         "syllabus",
         "lectures",

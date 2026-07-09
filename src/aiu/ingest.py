@@ -58,13 +58,17 @@ class InventoryRecord:
 
     path: Path
     context_root: Path
+    citation_prefix: str | None = None
 
     @property
     def relative_path(self) -> str:
         try:
-            return self.path.relative_to(self.context_root).as_posix()
+            relative = self.path.relative_to(self.context_root).as_posix()
         except ValueError:
-            return self.path.name
+            relative = self.path.name
+        if self.citation_prefix:
+            return f"{self.citation_prefix}/{relative}"
+        return relative
 
 
 @dataclass
@@ -99,13 +103,22 @@ def inventory_context_paths(
     result = InventoryResult()
     seen_source_ids: set[str] = set()
 
-    for raw_context_path in context_paths:
+    raw_context_paths = list(context_paths)
+    use_context_prefixes = len(raw_context_paths) > 1
+
+    for raw_context_path in raw_context_paths:
         context_path = Path(raw_context_path).expanduser().resolve(strict=False)
         if not context_path.exists():
             result.errors.append({"path": raw_context_path, "error": "path does not exist"})
             continue
 
-        records = _walk_context_path(context_path, excludes=tuple(excludes), result=result)
+        citation_prefix = _context_prefix(context_path) if use_context_prefixes else None
+        records = _walk_context_path(
+            context_path,
+            excludes=tuple(excludes),
+            result=result,
+            citation_prefix=citation_prefix,
+        )
         for record in records:
             source = _source_from_record(record, result=result)
             if source is None:
@@ -133,9 +146,16 @@ def _walk_context_path(
     *,
     excludes: tuple[str, ...],
     result: InventoryResult,
+    citation_prefix: str | None,
 ) -> list[InventoryRecord]:
     if context_path.is_file():
-        return [InventoryRecord(path=context_path, context_root=context_path.parent)]
+        return [
+            InventoryRecord(
+                path=context_path,
+                context_root=context_path.parent,
+                citation_prefix=citation_prefix,
+            )
+        ]
 
     if not context_path.is_dir():
         result.skipped.append({"path": context_path.as_posix(), "reason": "not a regular file"})
@@ -155,8 +175,21 @@ def _walk_context_path(
         if path.is_dir():
             continue
         if path.is_file():
-            records.append(InventoryRecord(path=path, context_root=context_path))
+            records.append(
+                InventoryRecord(
+                    path=path,
+                    context_root=context_path,
+                    citation_prefix=citation_prefix,
+                )
+            )
     return records
+
+
+def _context_prefix(context_path: Path) -> str | None:
+    if not context_path.is_dir():
+        return None
+    name = context_path.name.strip()
+    return name or None
 
 
 def _read_ignore_patterns(context_path: Path) -> list[str]:

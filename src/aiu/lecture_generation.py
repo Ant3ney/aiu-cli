@@ -10,6 +10,7 @@ from typing import Any
 from aiu.artifact_store import ArtifactStore
 from aiu.auth import AuthStore
 from aiu.config import ProviderName
+from aiu.context_research import research_packet_for_query, source_refs_from_research
 from aiu.course_memory import (
     build_lecture_context_packet,
     lecture_context_prompt,
@@ -49,6 +50,14 @@ class LectureGenerationContext:
     manifest: CourseManifest
     source_refs: list[str]
     provider: ProviderAdapter | None
+
+
+@dataclass(frozen=True)
+class SourceContextPacket:
+    """Compact source packet selected for one lecture."""
+
+    text: str
+    source_refs: list[str]
 
 
 def generate_lecture_artifacts(
@@ -357,7 +366,8 @@ def _lecture_session(
         f"Connect week {week} material to the overall course plan.",
     ]
     minimum_words = minimum_transcript_words(duration_hours)
-    source_context = _source_context_for_prompt(context.store, item, context.blueprint, objectives)
+    source_packet = _source_context_for_prompt(context.store, item, context.blueprint, objectives)
+    source_context = source_packet.text
     context_packet = build_lecture_context_packet(
         context.store.root,
         context.blueprint,
@@ -382,7 +392,7 @@ def _lecture_session(
         title=title,
         objectives=objectives,
         transcript=transcript,
-        source_refs=context.source_refs,
+        source_refs=source_packet.source_refs or context.source_refs,
         estimated_duration=duration_hours,
         vr_cues=_lecture_vr_cues(lecture_id, title),
     )
@@ -463,11 +473,8 @@ def _fake_lecture_transcript(
     day = int(item["day"])
     week_plan = _week_plan_for(context.blueprint, week)
     topics = week_plan.topics if week_plan is not None else [title]
-    source_note = (
-        "We will connect this lecture to the local source references listed for the course."
-        if context.source_refs
-        else "No local source packet is attached, so we will work from the course blueprint."
-    )
+    source_context = str(context_packet.get("source_context", ""))
+    source_note = _fake_source_intro(source_context, context.source_refs)
     continuity_note = _fake_continuity_note(context_packet)
     paragraphs = [
         (
@@ -488,6 +495,7 @@ def _fake_lecture_transcript(
         objective = objectives[(cycle - 1) % len(objectives)]
         lens = _fake_lens(cycle)
         activity = _fake_activity(cycle)
+        source_citation = _fake_source_citation(source_context, cycle)
         paragraph = (
             f"Part {cycle}. Let us slow down and examine {topic} through {lens}. "
             f"The important objective is this: {objective} I would write that sentence on "
@@ -501,7 +509,8 @@ def _fake_lecture_transcript(
             "team has to search, guess, and hope. If the change is represented as data with "
             "clear validation, the team can reason about it directly. Now pause and ask "
             f"yourself what evidence would prove that the design supports {topic}. "
-            f"{activity} After that check, we return to the larger course question: how does "
+            f"{source_citation} {activity} After that check, we return to the larger "
+            "course question: how does "
             "this week's material help us build systems that are understandable, testable, "
             "and flexible enough for future lectures and assignments?"
         )
@@ -642,11 +651,15 @@ def _provider_lecture_prompt(
         f"{_week_context_for_prompt(context.blueprint, week)}\n\n"
         "Course memory and continuity guidance:\n"
         f"{lecture_context_prompt(context_packet)}\n\n"
-        "Available local source excerpts:\n"
+        "Available context research packet and local source excerpts:\n"
         f"{source_context}\n\n"
         "Requirements for this response:\n"
         "- Write professor speech only, as if delivered live in a lecture hall.\n"
         "- Include conceptual explanation, a concrete example, and a check for understanding.\n"
+        "- Use the context research packet as evidence, not optional background.\n"
+        "- Naturally cite relevant local source paths and chunk IDs from the packet when "
+        "supporting a claim.\n"
+        "- Do not invent source names or cite files that are not present in the packet.\n"
         "- Include natural transitions and occasional board-work or slide cues.\n"
         "- Advance from prior lecture summaries instead of restarting the course.\n"
         "- Briefly weave prior ideas forward, but do not re-teach extensively covered topics.\n"
@@ -679,6 +692,44 @@ def _fake_continuity_note(context_packet: dict[str, Any]) -> str:
     return " ".join(pieces)
 
 
+def _fake_source_intro(source_context: str, source_refs: list[str]) -> str:
+    anchors = _source_anchors(source_context)
+    if anchors:
+        return (
+            "The context research packet gives us concrete local evidence, especially "
+            f"{_join_for_sentence(anchors[:3])}. I will keep returning to these source "
+            "paths and chunk IDs as evidence throughout the lecture."
+        )
+    if source_refs:
+        return (
+            "We will connect this lecture to the local source references listed for the "
+            "course and use them as recurring evidence."
+        )
+    return "No local source packet is attached, so we will work from the course blueprint."
+
+
+def _fake_source_citation(source_context: str, cycle: int) -> str:
+    anchors = _source_anchors(source_context)
+    if not anchors:
+        return ""
+    anchor = anchors[(cycle - 1) % len(anchors)]
+    return (
+        f"The source research packet points us to {anchor}; cite that local evidence "
+        "before turning the idea into a general principle."
+    )
+
+
+def _source_anchors(source_context: str) -> list[str]:
+    anchors: list[str] = []
+    for line in source_context.splitlines():
+        if not line.startswith("Source: "):
+            continue
+        anchor = line.removeprefix("Source: ").strip()
+        if anchor and anchor not in anchors:
+            anchors.append(anchor)
+    return anchors
+
+
 def _join_for_sentence(values: list[Any]) -> str:
     return ", ".join(str(value) for value in values)
 
@@ -688,12 +739,7 @@ def _source_context_for_prompt(
     item: dict[str, Any],
     blueprint: CourseBlueprint,
     objectives: list[str],
-) -> str:
-    chunk_manifest_path = store.course_path("source_index/chunk_manifest.json")
-    if not chunk_manifest_path.exists():
-        return "No local source excerpts were available."
-
-    chunk_manifest: dict[str, Any] = store.read_json("source_index/chunk_manifest.json")
+) -> SourceContextPacket:
     query_terms = _terms(
         " ".join(
             [
@@ -703,44 +749,16 @@ def _source_context_for_prompt(
             ]
         )
     )
-    scored_chunks: list[tuple[int, int, str, str]] = []
-    for index, chunk in enumerate(chunk_manifest.get("chunks", [])):
-        excerpt = _chunk_excerpt(store, chunk)
-        if not excerpt:
-            continue
-        source_ref = str(chunk.get("source_ref", "local source"))
-        score = len(query_terms & _terms(f"{source_ref} {excerpt}"))
-        scored_chunks.append((-score, index, source_ref, excerpt))
-
-    if not scored_chunks:
-        return "No readable local source excerpts were available."
-
-    selected: list[str] = []
-    remaining_chars = SOURCE_CONTEXT_CHAR_LIMIT
-    for _score, _index, source_ref, excerpt in sorted(scored_chunks)[:SOURCE_CONTEXT_CHUNK_LIMIT]:
-        if remaining_chars <= 0:
-            break
-        clipped = excerpt[:remaining_chars].strip()
-        if not clipped:
-            continue
-        selected.append(f"Source: {source_ref}\n{clipped}")
-        remaining_chars -= len(clipped)
-    if not selected:
-        return "No readable local source excerpts were available."
-    return "\n\n".join(selected)
-
-
-def _chunk_excerpt(store: ArtifactStore, chunk: dict[str, Any]) -> str:
-    text_ref = str(chunk.get("text_ref", ""))
-    if not text_ref:
-        return ""
-    try:
-        text = store.course_path(text_ref).read_text(encoding="utf-8")
-    except OSError:
-        return ""
-    start = int(chunk.get("char_start", 0))
-    end = int(chunk.get("char_end", len(text)))
-    return " ".join(text[start:end].split())
+    packet = research_packet_for_query(
+        store,
+        " ".join(sorted(query_terms)),
+        max_chunks=SOURCE_CONTEXT_CHUNK_LIMIT,
+        char_limit=SOURCE_CONTEXT_CHAR_LIMIT,
+    )
+    return SourceContextPacket(
+        text=str(packet.get("text", "No local source excerpts were available.")),
+        source_refs=[str(ref) for ref in packet.get("source_refs", []) if ref],
+    )
 
 
 def _terms(text: str) -> set[str]:
@@ -872,6 +890,9 @@ def _lecture_markdown(lecture: LectureSession) -> str:
 
 
 def _source_refs(store: ArtifactStore) -> list[str]:
+    researched_refs = source_refs_from_research(store)
+    if researched_refs:
+        return researched_refs
     chunk_manifest_path = store.course_path("source_index/chunk_manifest.json")
     if not chunk_manifest_path.exists():
         return []

@@ -11,6 +11,7 @@ import click
 from aiu.approval import ApprovalError, approve_course
 from aiu.auth import AuthConfigurationError, AuthStore
 from aiu.config import CourseSettings
+from aiu.context_research import ContextResearchError, research_context
 from aiu.course_materials import CourseMaterialError, generate_syllabus_artifacts
 from aiu.exports import ExportError, export_course
 from aiu.extract import extract_and_chunk_sources
@@ -310,6 +311,8 @@ def course_create(
             )
             write_inventory_artifacts(project.paths.root, inventory)
             extract_and_chunk_sources(project.paths.root, inventory, progress=progress_view)
+            if not init_only:
+                research_context(project.paths.root, progress=progress_view)
             log_project_event(project.paths.root, "context inventoried and extracted")
         if generate_until == "blueprint":
             plan_course(project.paths.root, progress=progress_view)
@@ -363,6 +366,7 @@ def course_create(
             progress_view.finish("Course creation command finished.")
     except (
         ApprovalError,
+        ContextResearchError,
         CourseMaterialError,
         CourseValidationError,
         GenerationError,

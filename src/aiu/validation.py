@@ -321,6 +321,12 @@ def _validate_citations(store: ArtifactStore, warnings: list[str]) -> None:
     chunk_manifest = store.course_path("source_index/chunk_manifest.json")
     if not chunk_manifest.exists():
         warnings.append("No local source chunks were available for citation coverage.")
+        return
+    if not store.course_path("context_research.md").exists():
+        warnings.append(
+            "Local source chunks exist but context_research.md is missing; "
+            "source-grounded generation may be shallow."
+        )
 
 
 def _citation_coverage(store: ArtifactStore) -> float:

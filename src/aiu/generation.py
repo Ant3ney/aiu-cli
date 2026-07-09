@@ -13,6 +13,7 @@ from aiu.assessment_generation import (
     generate_assessment_artifacts,
     generate_assessment_week,
 )
+from aiu.context_research import ContextResearchError, research_context
 from aiu.course_materials import CourseMaterialError, generate_syllabus_artifacts
 from aiu.lab_generation import (
     LabGenerationError,
@@ -70,6 +71,10 @@ def generate_course(
         "Generation request accepted",
         detail=f"stage={selected_stage}, force={force}",
     )
+    try:
+        research_context(course_root, progress=progress)
+    except ContextResearchError as exc:
+        raise GenerationError(str(exc)) from exc
 
     if from_ref is not None or to_ref is not None:
         if from_ref is None or to_ref is None:
