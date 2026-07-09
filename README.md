@@ -115,24 +115,64 @@ aiu course create "Teach me artificial intelligence" \
   --yes
 ```
 
-To preview and refine the syllabus before the full course is generated:
+## Preview and refine the syllabus before generating the full course
+
+Use `--generate-until syllabus` when you want to inspect the course plan before
+AIU spends time generating every lecture, lab, and assessment. The path passed to
+`--output` is your course folder; use that same folder in the later feedback,
+generate, resume, validate, and export commands.
+
+1. Create the project and stop after the syllabus preview:
 
 ```bash
 aiu course create "Teach me data-driven creature collector RPG design" \
   --provider fake \
   --output ./courses/rpg \
   --generate-until syllabus
+```
 
+2. Review the generated preview files:
+
+```bash
+less ./courses/rpg/syllabus/syllabus.md
+less ./courses/rpg/course_blueprint.md
+```
+
+3. If the plan is missing topics, add feedback. You can run this command more
+than once; each note is appended to `course_feedback.md`, then AIU regenerates
+the blueprint and syllabus preview from all accumulated feedback.
+
+```bash
 aiu course feedback ./courses/rpg \
   "Make sure the course covers creature stat schemas, evolution rules, battle balance, and content authoring tools."
+```
 
+4. Review the regenerated syllabus. If it still needs changes, repeat
+`aiu course feedback <course-folder> "...your feedback..."`.
+
+5. When the syllabus looks right, start full course generation:
+
+```bash
 aiu course generate ./courses/rpg
 ```
 
-The preview workflow writes `syllabus/syllabus.md` and keeps full lecture, lab,
-assessment, and validation generation pending. Feedback is appended to
-`course_feedback.md`, then the blueprint and syllabus preview are regenerated
-from the accumulated feedback.
+`--generate-until syllabus` creates an approved blueprint snapshot so the next
+`aiu course generate <course-folder>` command can begin immediately. If you want
+an explicit approval command after review, run:
+
+```bash
+aiu course approve ./courses/rpg
+aiu course generate ./courses/rpg
+```
+
+If full generation is interrupted later, continue from checkpointed artifacts:
+
+```bash
+aiu course resume ./courses/rpg --yes
+```
+
+Replace `./courses/rpg` with the actual folder you supplied to `--output`; it is
+not a required name.
 
 Then validate and export:
 
