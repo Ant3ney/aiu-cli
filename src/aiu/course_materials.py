@@ -147,11 +147,15 @@ def _syllabus_markdown(blueprint: CourseBlueprint, source_refs: list[str]) -> st
         "## Learning Outcomes",
         *[f"- {outcome}" for outcome in blueprint.outcomes],
         "",
-        "## Weekly Structure",
-        *[f"- Week {week.week}: {week.title}" for week in blueprint.week_plan],
+        "## Course Planning Notes",
+        *[f"- {item}" for item in blueprint.source_usage_plan],
         "",
-        "## Source Grounding",
+        "## Weekly Structure",
     ]
+    for week in blueprint.week_plan:
+        lines.append(f"- Week {week.week}: {week.title}")
+        lines.append(f"  - Topics: {', '.join(week.topics)}")
+    lines.extend(["", "## Source Grounding"])
     if source_refs:
         lines.extend(f"- {source_ref}" for source_ref in source_refs)
     else:

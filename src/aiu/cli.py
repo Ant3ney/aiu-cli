@@ -10,11 +10,19 @@ import click
 from aiu.approval import ApprovalError, approve_course
 from aiu.auth import AuthConfigurationError, AuthStore
 from aiu.config import CourseSettings
+from aiu.course_materials import CourseMaterialError, generate_syllabus_artifacts
 from aiu.exports import ExportError, export_course
 from aiu.extract import extract_and_chunk_sources
+from aiu.feedback import FeedbackError, append_course_feedback
 from aiu.generation import GenerationError, generate_course
 from aiu.ingest import inventory_context_paths, write_inventory_artifacts
-from aiu.logging import CourseLoadingView, configure_logging, emit_progress, log_project_event
+from aiu.logging import (
+    CourseLoadingView,
+    configure_logging,
+    content_snippet,
+    emit_progress,
+    log_project_event,
+)
 from aiu.planning import PlanningError, plan_course
 from aiu.project import ProjectInitializationError, initialize_project, write_project_prompt
 from aiu.prompt import PromptIntakeError, read_prompt_text
@@ -171,7 +179,7 @@ def course() -> None:
 @click.option("--init-only", is_flag=True, help="Initialize project inputs without generation.")
 @click.option(
     "--generate-until",
-    type=click.Choice(["blueprint"], case_sensitive=False),
+    type=click.Choice(["blueprint", "syllabus"], case_sensitive=False),
     help="Run the create pipeline through the selected stage.",
 )
 def course_create(
@@ -259,6 +267,20 @@ def course_create(
         if generate_until == "blueprint":
             plan_course(project.paths.root, progress=progress_view)
             log_project_event(project.paths.root, "blueprint generated")
+        elif generate_until == "syllabus":
+            plan_course(project.paths.root, progress=progress_view)
+            log_project_event(project.paths.root, "blueprint generated")
+            approve_course(project.paths.root, mode="preview")
+            emit_progress(
+                progress_view,
+                "approval",
+                "Approved blueprint for syllabus preview",
+                artifact="approved_course_blueprint.json",
+                detail="Preview approval created so syllabus artifacts can be generated.",
+            )
+            log_project_event(project.paths.root, "blueprint approved for syllabus preview")
+            generate_syllabus_artifacts(project.paths.root, progress=progress_view)
+            log_project_event(project.paths.root, "syllabus preview generated")
         elif yes and not init_only:
             plan_course(project.paths.root, progress=progress_view)
             log_project_event(project.paths.root, "blueprint generated")
@@ -294,6 +316,7 @@ def course_create(
             progress_view.finish("Course creation command finished.")
     except (
         ApprovalError,
+        CourseMaterialError,
         CourseValidationError,
         GenerationError,
         PlanningError,
@@ -310,6 +333,10 @@ def course_create(
     if not init_only:
         if generate_until == "blueprint":
             click.echo("Generated course blueprint; full course generation is still pending.")
+        elif generate_until == "syllabus":
+            click.echo(
+                "Generated syllabus preview; review syllabus/syllabus.md before full generation."
+            )
         elif yes:
             click.echo("Generated and validated AI University course package.")
         else:
@@ -342,6 +369,80 @@ def course_plan(course_root: str, force: bool) -> None:
     if progress_view is not None:
         progress_view.finish(f"Generated course blueprint: {blueprint.course_title}")
     click.echo(f"Generated course blueprint: {blueprint.course_title}")
+
+
+@course.command("feedback")
+@click.argument("course_root", type=click.Path(exists=False, path_type=str))
+@click.argument("feedback_text", required=False)
+@click.option(
+    "--prompt",
+    "feedback_file",
+    type=click.Path(exists=True, dir_okay=False, path_type=str),
+    help="Read syllabus feedback from a Markdown/text file.",
+)
+@click.option("--stdin", "from_stdin", is_flag=True, help="Read syllabus feedback from stdin.")
+def course_feedback(
+    course_root: str,
+    feedback_text: str | None,
+    feedback_file: str | None,
+    from_stdin: bool,
+) -> None:
+    """Add feedback and regenerate the blueprint plus syllabus preview."""
+
+    progress_view: CourseLoadingView | None = None
+    if Path(course_root).exists():
+        progress_view = CourseLoadingView(course_root)
+        progress_view.start(
+            "AI University syllabus feedback",
+            detail="refine blueprint and regenerate syllabus preview",
+        )
+    try:
+        feedback = read_prompt_text(
+            prompt_text=feedback_text,
+            prompt_file=feedback_file,
+            from_stdin=from_stdin,
+            stdin=click.get_text_stream("stdin"),
+        )
+        append_course_feedback(course_root, feedback)
+        emit_progress(
+            progress_view,
+            "inputs",
+            "Stored syllabus feedback",
+            artifact="course_feedback.md",
+            snippet=content_snippet(feedback),
+        )
+        log_project_event(course_root, "course feedback stored")
+        blueprint = plan_course(course_root, force=True, progress=progress_view)
+        log_project_event(course_root, "blueprint regenerated from course feedback")
+        approve_course(course_root, mode="feedback")
+        emit_progress(
+            progress_view,
+            "approval",
+            "Approved refined blueprint for syllabus preview",
+            artifact="approved_course_blueprint.json",
+            detail="Feedback refinement replaces the prior approved blueprint snapshot.",
+        )
+        log_project_event(course_root, "refined blueprint approved")
+        generate_syllabus_artifacts(course_root, force=True, progress=progress_view)
+        log_project_event(course_root, "syllabus preview regenerated from feedback")
+    except (
+        ApprovalError,
+        CourseMaterialError,
+        FeedbackError,
+        PlanningError,
+        PromptIntakeError,
+    ) as exc:
+        if progress_view is not None:
+            progress_view.fail(str(exc))
+        raise click.ClickException(str(exc)) from exc
+
+    if progress_view is not None:
+        progress_view.finish(f"Regenerated syllabus preview: {blueprint.course_title}")
+    click.echo("Applied course feedback and regenerated the syllabus preview.")
+    click.echo(f"Review: {Path(course_root) / 'syllabus' / 'syllabus.md'}")
+    click.echo(
+        "Full course generation is still pending until you run aiu course generate or resume."
+    )
 
 
 @course.command("approve")

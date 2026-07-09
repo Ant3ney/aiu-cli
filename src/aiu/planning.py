@@ -10,6 +10,7 @@ from typing import Any
 from aiu.artifact_store import ArtifactStore
 from aiu.auth import AuthStore
 from aiu.config import CourseSettings, LabPolicy, ProviderName
+from aiu.feedback import read_course_feedback
 from aiu.logging import ProgressCallback, content_snippet, emit_progress
 from aiu.models import (
     AssessmentPlanEntry,
@@ -26,6 +27,32 @@ from aiu.state import complete_stage, fail_stage, stage_is_complete, start_stage
 
 class PlanningError(ValueError):
     """Raised when a course plan cannot be generated."""
+
+
+_FEEDBACK_STOPWORDS = {
+    "about",
+    "also",
+    "and",
+    "are",
+    "cover",
+    "covers",
+    "for",
+    "from",
+    "include",
+    "into",
+    "looking",
+    "make",
+    "more",
+    "please",
+    "sure",
+    "that",
+    "the",
+    "this",
+    "topic",
+    "topics",
+    "want",
+    "with",
+}
 
 
 def plan_course(
@@ -81,7 +108,22 @@ def plan_course(
         "Inferred course subject",
         detail=f"Subject: {content_snippet(subject, max_chars=120)}",
     )
-    provider_plan_seed = _provider_plan_seed(prompt=prompt, settings=settings)
+    feedback = read_course_feedback(course_root)
+    feedback_priorities = _feedback_priorities(feedback)
+    if feedback_priorities:
+        emit_progress(
+            progress,
+            "blueprint",
+            "Loaded learner feedback for syllabus refinement",
+            artifact="course_feedback.md",
+            detail=f"{len(feedback_priorities)} requested coverage item(s)",
+            snippet=content_snippet("; ".join(feedback_priorities)),
+        )
+    provider_plan_seed = _provider_plan_seed(
+        prompt=prompt,
+        settings=settings,
+        feedback=feedback,
+    )
     if provider_plan_seed:
         emit_progress(
             progress,
@@ -93,6 +135,8 @@ def plan_course(
         subject=subject,
         prompt=prompt,
         settings=settings,
+        feedback=feedback,
+        feedback_priorities=feedback_priorities,
         provider_plan_seed=provider_plan_seed,
     )
     blueprint = _blueprint_from_intent(intent, settings)
@@ -148,6 +192,8 @@ def _intent_analysis(
     subject: str,
     prompt: str,
     settings: CourseSettings,
+    feedback: str,
+    feedback_priorities: list[str],
     provider_plan_seed: str | None,
 ) -> dict[str, Any]:
     practical_balance = "applied" if settings.lab_policy != LabPolicy.NEVER else "conceptual"
@@ -164,6 +210,9 @@ def _intent_analysis(
         "prompt": prompt,
         "provider": settings.provider.value,
         "subject": subject,
+        "feedback": feedback,
+        "feedback_priorities": feedback_priorities,
+        "feedback_keywords": _feedback_keywords(feedback_priorities),
         "topic_keywords": _keywords(subject),
     }
     if provider_plan_seed:
@@ -174,15 +223,24 @@ def _intent_analysis(
 def _blueprint_from_intent(intent: dict[str, Any], settings: CourseSettings) -> CourseBlueprint:
     subject = str(intent["subject"])
     title_subject = subject.title()
+    feedback_priorities = [str(item) for item in intent.get("feedback_priorities", [])]
     outcomes = [
         f"Explain foundational concepts in {subject}.",
         f"Apply {subject} methods to realistic problems.",
         f"Evaluate tradeoffs, assumptions, and limitations in {subject}.",
         f"Communicate solutions using precise {subject} vocabulary.",
     ]
+    if feedback_priorities:
+        outcomes.append(
+            "Address learner-requested coverage including "
+            f"{_summarize_priority_list(feedback_priorities, max_items=3)}."
+        )
     weeks = list(range(1, settings.weeks + 1))
     modules = _modules(subject, weeks, outcomes)
-    progression = _curriculum_progression(subject, settings.weeks)
+    progression = _apply_feedback_to_progression(
+        _curriculum_progression(subject, settings.weeks),
+        feedback_priorities,
+    )
     week_plan = [
         _week_plan(subject, week, settings, focus=progression[week - 1])
         for week in weeks
@@ -192,6 +250,10 @@ def _blueprint_from_intent(intent: dict[str, Any], settings: CourseSettings) -> 
         "Use provided source chunks where available.",
         "Flag missing or unsupported source coverage before detailed generation.",
     ]
+    if feedback_priorities:
+        source_usage_plan.extend(
+            f"Learner feedback priority: {priority}" for priority in feedback_priorities
+        )
     if provider_plan_seed := intent.get("provider_plan_seed"):
         source_usage_plan.append(f"Provider planning guidance: {provider_plan_seed}")
     return CourseBlueprint(
@@ -306,6 +368,63 @@ def _assessment_plan(outcomes: list[str], settings: CourseSettings) -> list[Asse
         )
     )
     return plan
+
+
+def _feedback_priorities(feedback: str) -> list[str]:
+    priorities: list[str] = []
+    for raw_line in feedback.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        line = re.sub(r"^[-*]\s+", "", line)
+        line = re.sub(r"^\d+[.)]\s+", "", line)
+        if line:
+            priorities.append(content_snippet(line, max_chars=180))
+    if not priorities and feedback.strip():
+        priorities.append(content_snippet(feedback, max_chars=180))
+    return priorities[:8]
+
+
+def _feedback_keywords(priorities: list[str]) -> list[str]:
+    keywords: list[str] = []
+    for word in re.findall(r"[A-Za-z0-9]+", " ".join(priorities).lower()):
+        if len(word) < 3 or word in _FEEDBACK_STOPWORDS or word in keywords:
+            continue
+        keywords.append(word)
+        if len(keywords) == 12:
+            break
+    return keywords
+
+
+def _summarize_priority_list(priorities: list[str], *, max_items: int) -> str:
+    selected = [content_snippet(priority, max_chars=80) for priority in priorities[:max_items]]
+    if len(priorities) > max_items:
+        selected.append(f"{len(priorities) - max_items} more requested item(s)")
+    return "; ".join(selected)
+
+
+def _apply_feedback_to_progression(
+    progression: list[dict[str, Any]],
+    priorities: list[str],
+) -> list[dict[str, Any]]:
+    if not priorities or not progression:
+        return progression
+
+    updated = [
+        {
+            **focus,
+            "topics": list(focus["topics"]),
+            "lecture_angles": list(focus["lecture_angles"]),
+        }
+        for focus in progression
+    ]
+    for index, priority in enumerate(priorities):
+        target_index = min(len(updated) - 1, index * len(updated) // max(1, len(priorities)))
+        label = content_snippet(priority, max_chars=90)
+        focus = updated[target_index]
+        focus["topics"].append(f"learner-requested topic: {label}")
+        focus["lecture_angles"].append(f"Requested coverage: {label}")
+    return updated
 
 
 def _curriculum_progression(subject: str, week_count: int) -> list[dict[str, Any]]:
@@ -558,12 +677,16 @@ def _blueprint_markdown(blueprint: CourseBlueprint) -> str:
     lines.extend(["", "## Weekly Plan"])
     for week in blueprint.week_plan:
         lines.append(f"- Week {week.week}: {week.title}")
+        lines.append(f"  - Topics: {', '.join(week.topics)}")
     lines.extend(["", "## Assessment Plan"])
     for assessment in blueprint.assessment_plan:
         lines.append(
             f"- {assessment.assessment_id} ({assessment.type.value}) due week {assessment.due_week}"
         )
     lines.extend(["", "## Lab Policy", f"{blueprint.lab_policy.value}"])
+    if blueprint.source_usage_plan:
+        lines.extend(["", "## Source and Feedback Usage"])
+        lines.extend(f"- {item}" for item in blueprint.source_usage_plan)
     return "\n".join(lines) + "\n"
 
 
@@ -579,7 +702,12 @@ def _keywords(subject: str) -> list[str]:
     return [word.lower() for word in re.findall(r"[A-Za-z0-9]+", subject)][:8]
 
 
-def _provider_plan_seed(*, prompt: str, settings: CourseSettings) -> str | None:
+def _provider_plan_seed(
+    *,
+    prompt: str,
+    settings: CourseSettings,
+    feedback: str,
+) -> str | None:
     if settings.provider == ProviderName.FAKE:
         return None
 
@@ -595,13 +723,19 @@ def _provider_plan_seed(*, prompt: str, settings: CourseSettings) -> str | None:
         api_key_env=auth_config.api_key_env,
         codex_command=auth_config.codex_command,
     )
+    feedback_block = ""
+    if feedback.strip():
+        feedback_block = (
+            "\n\nLearner feedback to incorporate into the course plan:\n"
+            f"{feedback.strip()}"
+        )
     try:
         result = provider.generate(
             GenerationRequest(
                 prompt=(
                     "Create a concise planning note for a university-style course. "
                     "Return plain text only, no markdown headings.\n\n"
-                    f"Learning prompt: {prompt}"
+                    f"Learning prompt: {prompt}{feedback_block}"
                 ),
                 purpose="course_plan_seed",
                 system_prompt=(

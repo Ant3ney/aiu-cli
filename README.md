@@ -115,6 +115,25 @@ aiu course create "Teach me artificial intelligence" \
   --yes
 ```
 
+To preview and refine the syllabus before the full course is generated:
+
+```bash
+aiu course create "Teach me data-driven creature collector RPG design" \
+  --provider fake \
+  --output ./courses/rpg \
+  --generate-until syllabus
+
+aiu course feedback ./courses/rpg \
+  "Make sure the course covers creature stat schemas, evolution rules, battle balance, and content authoring tools."
+
+aiu course generate ./courses/rpg
+```
+
+The preview workflow writes `syllabus/syllabus.md` and keeps full lecture, lab,
+assessment, and validation generation pending. Feedback is appended to
+`course_feedback.md`, then the blueprint and syllabus preview are regenerated
+from the accumulated feedback.
+
 Then validate and export:
 
 ```bash
