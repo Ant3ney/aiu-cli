@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shlex
 from collections.abc import Callable
 from pathlib import Path
 
@@ -29,6 +30,7 @@ from aiu.prompt import PromptIntakeError, read_prompt_text
 from aiu.regeneration import RegenerationError, regenerate_artifact
 from aiu.resume import ResumeError, resume_course
 from aiu.state import status_lines
+from aiu.updater import DEFAULT_REPOSITORY_URL, UpdateError, update_aiu
 from aiu.validation import CourseValidationError, validate_course
 from aiu.version import __version__
 
@@ -51,6 +53,51 @@ def main(verbose: int) -> None:
     """Generate complete AI University course packages from prompts and source material."""
 
     configure_logging(verbosity=verbose)
+
+
+@main.command("update")
+@click.option(
+    "--source-dir",
+    type=click.Path(file_okay=False, dir_okay=True, path_type=str),
+    help=(
+        "Existing AIU source checkout to update. Defaults to the installed package checkout "
+        "or a managed clone under the user data directory."
+    ),
+)
+@click.option(
+    "--repo-url",
+    default=DEFAULT_REPOSITORY_URL,
+    show_default=True,
+    help="Git repository to clone when no source checkout exists.",
+)
+@click.option("--branch", help="Branch to fetch, checkout, and pull before reinstalling.")
+@click.option("--dry-run", is_flag=True, help="Show update commands without running them.")
+def update_command(
+    source_dir: str | None,
+    repo_url: str,
+    branch: str | None,
+    dry_run: bool,
+) -> None:
+    """Update AIU from GitHub and reinstall it."""
+
+    try:
+        result = update_aiu(
+            branch=branch,
+            dry_run=dry_run,
+            repo_url=repo_url,
+            source_dir=source_dir,
+        )
+    except UpdateError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    click.echo(f"{'Planned update' if result.dry_run else 'Updated'} AIU source:")
+    click.echo(f"  {result.source_dir}")
+    for command in result.commands:
+        click.echo(f"- cd {command.cwd} && {shlex.join(command.args)}")
+    if result.dry_run:
+        click.echo("Dry run only; no files were changed.")
+    else:
+        click.echo("AIU update complete. Start a new shell if your PATH was recently changed.")
 
 
 @main.command("init")

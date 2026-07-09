@@ -84,6 +84,10 @@ def test_readme_documents_global_install_and_independent_auth_paths() -> None:
     readme = Path("README.md").read_text(encoding="utf-8")
 
     assert "pipx install ." in readme
+    assert "aiu update" in readme
+    assert "sudo apt install git python3-pipx" in readme
+    assert "sudo pacman -S git python-pipx" in readme
+    assert "It does not run `git pull` in the directory where you typed the command" in readme
     assert "aiu auth login --provider codex" in readme
     assert "aiu auth login --provider openai --api-key-env OPENAI_API_KEY" in readme
     assert "No OpenAI API key is required" in readme

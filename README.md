@@ -12,6 +12,19 @@ The CLI supports three provider modes:
 
 ## Global install
 
+Install prerequisites on Ubuntu:
+
+```bash
+sudo apt update
+sudo apt install git python3-pipx
+```
+
+Install prerequisites on Arch Linux:
+
+```bash
+sudo pacman -S git python-pipx
+```
+
 ```bash
 cd /path/to/ai_university_cli
 python -m pip install --user pipx
@@ -27,6 +40,32 @@ cd /path/to/ai_university_cli
 python -m venv .venv
 . .venv/bin/activate
 pip install -e ".[dev]"
+```
+
+## Update
+
+Run this from any directory:
+
+```bash
+aiu update
+```
+
+`aiu update` finds the AIU source checkout, pulls the latest GitHub source code
+there, and reinstalls AIU with the Python environment that is running the CLI.
+It does not run `git pull` in the directory where you typed the command.
+
+If AIU was installed without a local git checkout, the updater creates or reuses
+a managed clone at `~/.local/share/aiu-cli/source` unless `XDG_DATA_HOME` is set.
+You can preview the exact commands first:
+
+```bash
+aiu update --dry-run
+```
+
+Use an explicit checkout when needed:
+
+```bash
+aiu update --source-dir /path/to/ai_university_cli
 ```
 
 ## Authentication

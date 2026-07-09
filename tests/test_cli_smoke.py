@@ -31,6 +31,7 @@ def test_help_shows_top_level_command_groups(tmp_path: Path) -> None:
     assert "init" in result.stdout
     assert "auth" in result.stdout
     assert "course" in result.stdout
+    assert "update" in result.stdout
 
 
 def test_version_exits_zero(tmp_path: Path) -> None:
@@ -50,3 +51,25 @@ def test_help_and_version_do_not_create_project_files(tmp_path: Path) -> None:
     assert help_result.returncode == 0, help_result.stderr
     assert version_result.returncode == 0, version_result.stderr
     assert after == before
+
+
+def test_update_dry_run_uses_explicit_source_dir(tmp_path: Path) -> None:
+    source_dir = tmp_path / "aiu-source"
+    source_dir.mkdir()
+    (source_dir / ".git").mkdir()
+    caller = tmp_path / "caller"
+    caller.mkdir()
+
+    result = run_aiu(
+        "update",
+        "--dry-run",
+        "--source-dir",
+        str(source_dir),
+        cwd=caller,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "Planned update" in result.stdout
+    assert f"cd {source_dir}" in result.stdout
+    assert f"pip install --upgrade {source_dir}" in result.stdout
+    assert f"cd {caller}" not in result.stdout
