@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import logging
 import re
+import shutil
 import sys
+import textwrap
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -68,7 +70,7 @@ def log_project_event(course_root: str | Path, message: str) -> None:
 
 
 class CourseLoadingView:
-    """Line-oriented progress view that mirrors updates to the project log."""
+    """Human-facing progress view that mirrors detailed updates to the project log."""
 
     def __init__(self, course_root: str | Path, *, stream: TextIO | None = None) -> None:
         self.course_root = Path(course_root)
@@ -76,60 +78,78 @@ class CourseLoadingView:
         self.started_at = time.monotonic()
         self.event_count = 0
         self._next_tip_at = 6
+        self._last_stage: str | None = None
 
     def start(self, title: str, *, detail: str | None = None) -> None:
         """Render the loading view header and record it in the project log."""
 
         self._write("")
         self._write(title)
-        self._write(f"Log: {self.course_root / 'logs' / 'aiu.log'}")
+        self._write_wrapped("Project:", str(self.course_root), indent="  ")
+        self._write_wrapped("Log:", str(self.course_root / "logs" / "aiu.log"), indent="  ")
         if detail:
-            self._write(f"Scope: {detail}")
+            self._write_wrapped("Scope:", detail, indent="  ")
         log_project_event(self.course_root, f"course loading view started: {title}")
 
     def finish(self, message: str) -> None:
         """Render completion for a long-running course job."""
 
         elapsed = _elapsed_label(time.monotonic() - self.started_at)
-        line = f"[{elapsed}] complete  {message}"
-        self._write(line)
+        self._write("")
+        self._write_wrapped(f"[{elapsed}] complete", message, indent="  ")
         log_project_event(self.course_root, f"course loading view completed: {message}")
 
     def fail(self, message: str) -> None:
         """Render failure for a long-running course job."""
 
         elapsed = _elapsed_label(time.monotonic() - self.started_at)
-        line = f"[{elapsed}] failed    {message}"
-        self._write(line)
+        self._write("")
+        self._write_wrapped(f"[{elapsed}] failed", message, indent="  ")
         log_project_event(self.course_root, f"course loading view failed: {message}")
 
     def __call__(self, event: ProgressEvent) -> None:
         """Render and persist one progress event."""
 
         self.event_count += 1
-        elapsed = _elapsed_label(time.monotonic() - self.started_at)
-        progress = ""
-        if event.current is not None and event.total is not None:
-            progress = f" ({event.current}/{event.total})"
-        elif event.current is not None:
-            progress = f" ({event.current})"
-
-        artifact = f" -> {event.artifact}" if event.artifact else ""
-        stage = event.stage[:10].ljust(10)
-        line = f"[{elapsed}] {stage} {event.message}{progress}{artifact}"
-        self._write(line)
-        log_project_event(self.course_root, _event_log_line(event))
-
-        if event.detail:
-            self._write(f"           {content_snippet(event.detail, max_chars=180)}")
-        if event.snippet:
-            self._write(f"           preview: {event.snippet}")
-
+        tip = None
         if self.event_count >= self._next_tip_at:
             tip = _tip_for(self.event_count)
-            self._write(f"           while you wait: {tip}")
             log_project_event(self.course_root, f"while you wait: {tip}")
             self._next_tip_at += 9
+        self._write_line_event(event, tip=tip)
+        log_project_event(self.course_root, _event_log_line(event))
+
+    def _write_line_event(self, event: ProgressEvent, *, tip: str | None) -> None:
+        if event.stage != self._last_stage:
+            self._last_stage = event.stage
+            self._write("")
+            self._write(f"== {_stage_label(event.stage)} ==")
+
+        elapsed = _elapsed_label(time.monotonic() - self.started_at)
+        message = f"{event.message}{_progress_label(event)}"
+        self._write_wrapped(f"[{elapsed}]", message, indent="  ")
+
+        if event.artifact:
+            self._write_wrapped("artifact:", event.artifact, indent="    ")
+        if event.detail:
+            detail_chars = max(220, _terminal_width() * 4)
+            self._write_wrapped(
+                "detail:",
+                content_snippet(event.detail, max_chars=detail_chars),
+                indent="    ",
+            )
+        if event.snippet:
+            self._write_wrapped("preview:", event.snippet, indent="    ")
+        if tip:
+            self._write_wrapped("while you wait:", tip, indent="    ")
+
+    def _write_wrapped(self, label: str, text: str, *, indent: str) -> None:
+        label = label.strip()
+        body = " ".join(str(text).split())
+        first_indent = f"{indent}{label} " if label else indent
+        later_indent = " " * len(first_indent)
+        for line in _wrapped_lines(body, first_indent=first_indent, later_indent=later_indent):
+            self._write(line)
 
     def _write(self, line: str) -> None:
         print(line, file=self.stream, flush=True)
@@ -194,6 +214,50 @@ def _elapsed_label(seconds: float) -> str:
     if hours:
         return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
     return f"{minutes:02d}:{seconds:02d}"
+
+
+def _terminal_width() -> int:
+    return max(28, shutil.get_terminal_size(fallback=(80, 24)).columns)
+
+
+def _stage_label(stage: str) -> str:
+    return stage.replace("_", " ").replace("-", " ").title()
+
+
+def _progress_label(event: ProgressEvent) -> str:
+    if event.current is None:
+        return ""
+    if event.total is None:
+        return f" ({event.current})"
+    current = max(0, event.current)
+    total = max(1, event.total)
+    if _terminal_width() < 72:
+        return f" ({current}/{total})"
+    return f" ({current}/{total}) {_progress_bar(current, total)}"
+
+
+def _progress_bar(current: int, total: int, *, size: int = 12) -> str:
+    ratio = min(1.0, max(0.0, current / max(1, total)))
+    filled = round(size * ratio)
+    return f"[{'#' * filled}{'-' * (size - filled)}]"
+
+
+def _wrapped_lines(
+    text: str,
+    *,
+    first_indent: str = "",
+    later_indent: str = "",
+) -> list[str]:
+    width = _terminal_width()
+    lines = textwrap.wrap(
+        text,
+        width=width,
+        initial_indent=first_indent,
+        subsequent_indent=later_indent,
+        break_long_words=True,
+        break_on_hyphens=False,
+    )
+    return lines or [first_indent.rstrip()]
 
 
 def _tip_for(event_count: int) -> str:
