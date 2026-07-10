@@ -56,6 +56,11 @@ def test_lab_policy_always_creates_one_lab_per_week(tmp_path: Path) -> None:
     assert len(lab_json) == 24
     assert len(cue_json) == 24
     assert LabSession.model_validate(json.loads(lab_json[0].read_text(encoding="utf-8"))).vr_cues
+    first_lab = lab_markdown[0].read_text(encoding="utf-8")
+    assert "Course Map, Core Vocabulary, and Success Criteria" in first_lab
+    assert "course scope for always labs" in first_lab
+    assert "Complete a guided practice task" not in first_lab
+    assert "Review the week objectives" not in first_lab
 
 
 def test_lab_policy_never_creates_alternatives_but_no_lab_files(tmp_path: Path) -> None:
@@ -67,7 +72,10 @@ def test_lab_policy_never_creates_alternatives_but_no_lab_files(tmp_path: Path) 
     assert list((course_root / "labs").glob("*.md")) == []
     alternatives = sorted((course_root / "artifacts" / "activities").glob("*.md"))
     assert len(alternatives) == 24
-    assert "instead of a lab" in alternatives[0].read_text(encoding="utf-8")
+    first_activity = alternatives[0].read_text(encoding="utf-8")
+    assert "instead of a lab" in first_activity
+    assert "Course Map, Core Vocabulary, and Success Criteria" in first_activity
+    assert "discussion, case analysis, or workshop activity" not in first_activity
 
 
 def test_lab_policy_auto_records_rationale_in_blueprint_and_lab(tmp_path: Path) -> None:

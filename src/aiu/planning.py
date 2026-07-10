@@ -331,7 +331,13 @@ def _blueprint_from_intent(intent: dict[str, Any], settings: CourseSettings) -> 
         _week_plan(subject, week, settings, focus=progression[week - 1])
         for week in weeks
     ]
-    assessment_plan = _assessment_plan(outcomes, settings)
+    course_title = f"{title_subject}: AI University Course"
+    assessment_plan = _assessment_plan(
+        outcomes,
+        settings,
+        week_plan=week_plan,
+        course_title=course_title,
+    )
     source_usage_plan = [
         "Use provided source chunks where available.",
         "Read context_research.md before planning or generation and cite its source paths.",
@@ -354,7 +360,7 @@ def _blueprint_from_intent(intent: dict[str, Any], settings: CourseSettings) -> 
     if provider_plan_seed := intent.get("provider_plan_seed"):
         source_usage_plan.append(f"Provider planning guidance: {provider_plan_seed}")
     return CourseBlueprint(
-        course_title=f"{title_subject}: AI University Course",
+        course_title=course_title,
         description=(
             f"A structured {settings.weeks}-week course that builds from fundamentals "
             f"to applied work in {subject}."
@@ -458,7 +464,12 @@ def _deterministic_research_blueprint(
         prerequisites=_prerequisites(settings.level),
         modules=course_modules,
         week_plan=weeks,
-        assessment_plan=_assessment_plan(outcomes, settings),
+        assessment_plan=_assessment_plan(
+            outcomes,
+            settings,
+            week_plan=weeks,
+            course_title=f"{subject.title()}: AI University Course",
+        ),
         lab_policy=settings.lab_policy,
         lab_policy_rationale=_lab_policy_rationale(settings.lab_policy),
         source_usage_plan=_source_usage_plan_from_research(
@@ -613,7 +624,12 @@ def _blueprint_from_provider_payload(
         prerequisites=prerequisites or _prerequisites(settings.level),
         modules=modules,
         week_plan=weeks,
-        assessment_plan=_assessment_plan(outcomes, settings),
+        assessment_plan=_assessment_plan(
+            outcomes,
+            settings,
+            week_plan=weeks,
+            course_title=course_title,
+        ),
         lab_policy=settings.lab_policy,
         lab_policy_rationale=_lab_policy_rationale(settings.lab_policy),
         source_usage_plan=_source_usage_plan_from_research(
@@ -676,35 +692,54 @@ def _week_plan(
     )
 
 
-def _assessment_plan(outcomes: list[str], settings: CourseSettings) -> list[AssessmentPlanEntry]:
+def _assessment_plan(
+    outcomes: list[str],
+    settings: CourseSettings,
+    *,
+    week_plan: list[WeekPlan] | None = None,
+    course_title: str = "the course",
+) -> list[AssessmentPlanEntry]:
     plan: list[AssessmentPlanEntry] = []
+    week_by_number = {week.week: week for week in week_plan or []}
+    midpoint = max(1, settings.weeks // 2)
     for week in range(1, settings.weeks + 1):
+        current = week_by_number.get(week)
+        objective = outcomes[(week - 1) % len(outcomes)]
         plan.append(
             AssessmentPlanEntry(
                 assessment_id=f"homework_w{week:02d}",
                 type=AssessmentType.HOMEWORK,
                 due_week=week,
-                objectives=[outcomes[(week - 1) % len(outcomes)]],
-                description=f"Weekly homework for week {week}.",
+                objectives=[objective],
+                description=_homework_plan_description(week, current, objective),
             )
         )
         if week % 2 == 0:
+            previous = week_by_number.get(max(1, week - 1))
             plan.append(
                 AssessmentPlanEntry(
                     assessment_id=f"quiz_w{week:02d}",
                     type=AssessmentType.QUIZ,
                     due_week=week,
-                    objectives=[outcomes[(week - 1) % len(outcomes)]],
-                    description=f"Short quiz for week {week}.",
+                    objectives=[objective],
+                    description=_quiz_plan_description(week, previous, current),
                 )
             )
     plan.append(
         AssessmentPlanEntry(
             assessment_id="midterm",
             type=AssessmentType.MIDTERM,
-            due_week=max(1, settings.weeks // 2),
+            due_week=midpoint,
             objectives=outcomes[:2],
-            description="Cumulative midterm assessment.",
+            description=_exam_plan_description(
+                "Midterm",
+                [
+                    planned_week
+                    for planned_week in week_by_number.values()
+                    if planned_week.week <= midpoint
+                ],
+                course_title,
+            ),
         )
     )
     plan.append(
@@ -713,10 +748,92 @@ def _assessment_plan(outcomes: list[str], settings: CourseSettings) -> list[Asse
             type=AssessmentType.FINAL,
             due_week=settings.weeks,
             objectives=outcomes,
-            description="Cumulative final assessment.",
+            description=_exam_plan_description(
+                "Final",
+                list(week_by_number.values()),
+                course_title,
+            ),
+        )
+    )
+    project_weeks = list(_final_project_weeks(week_by_number).values())
+    project_topics = [topic for planned_week in project_weeks for topic in planned_week.topics]
+    plan.append(
+        AssessmentPlanEntry(
+            assessment_id="course_project",
+            type=AssessmentType.PROJECT,
+            due_week=settings.weeks,
+            objectives=outcomes,
+            description=(
+                f"Capstone artifact for {course_title} that demonstrates the outcomes through "
+                f"{_plan_topic_phrase(project_topics)}."
+            ),
         )
     )
     return plan
+
+
+def _homework_plan_description(week: int, current: WeekPlan | None, objective: str) -> str:
+    if current is None:
+        return f"Homework applies the week {week} objective: {objective}"
+    return (
+        f"Homework analyzes {current.title} through "
+        f"{_plan_topic_phrase(current.topics)} and connects the work to {objective}"
+    )
+
+
+def _quiz_plan_description(
+    week: int,
+    previous: WeekPlan | None,
+    current: WeekPlan | None,
+) -> str:
+    covered = [item for item in (previous, current) if item is not None]
+    if not covered:
+        return f"Quiz checks the concepts due in week {week}."
+    titles = "; ".join(f"Week {item.week}: {item.title}" for item in covered)
+    topics = _plan_topic_phrase([topic for item in covered for topic in item.topics])
+    return f"Quiz checks retention across {titles}, emphasizing {topics}."
+
+
+def _exam_plan_description(
+    label: str,
+    weeks: list[WeekPlan],
+    course_title: str,
+) -> str:
+    if not weeks:
+        return f"{label} assessment for {course_title}."
+    return (
+        f"{label} synthesizes {_plan_week_span(weeks)} in {course_title}, especially "
+        f"{_plan_topic_phrase([week.title for week in weeks], limit=4)}."
+    )
+
+
+def _final_project_weeks(week_by_number: dict[int, WeekPlan]) -> dict[int, WeekPlan]:
+    if not week_by_number:
+        return {}
+    week_numbers = sorted(week_by_number)[-min(4, len(week_by_number)) :]
+    return {week: week_by_number[week] for week in week_numbers}
+
+
+def _plan_week_span(weeks: list[WeekPlan]) -> str:
+    sorted_weeks = sorted(weeks, key=lambda item: item.week)
+    if len(sorted_weeks) == 1:
+        return f"Week {sorted_weeks[0].week}: {sorted_weeks[0].title}"
+    return f"Weeks {sorted_weeks[0].week}-{sorted_weeks[-1].week}"
+
+
+def _plan_topic_phrase(values, *, limit: int = 3) -> str:
+    selected = [
+        content_snippet(str(value), max_chars=100)
+        for value in values
+        if str(value)
+    ][:limit]
+    if not selected:
+        return "the planned course topics"
+    if len(selected) == 1:
+        return selected[0]
+    if len(selected) == 2:
+        return f"{selected[0]} and {selected[1]}"
+    return f"{', '.join(selected[:-1])}, and {selected[-1]}"
 
 
 def _feedback_priorities(feedback: str) -> list[str]:

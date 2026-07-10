@@ -83,3 +83,33 @@ def test_assessments_reference_learning_objectives_and_manifest_entries(tmp_path
     assert homework["objectives"]
     assert "learning" in " ".join(homework["objectives"]).lower() or homework["objectives"][0]
     assert any(entry["path"] == "homework/homework_w01.md" for entry in manifest["artifact_index"])
+
+
+def test_assessment_artifacts_are_week_specific_not_placeholders(tmp_path: Path) -> None:
+    course_root = create_approved_course(tmp_path)
+    result = run_aiu("course", "generate", str(course_root), "--stage", "assessments", cwd=tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    homework_text = (course_root / "homework" / "homework_w01.md").read_text(encoding="utf-8")
+    homework_json = json.loads(
+        (course_root / "homework" / "homework_w01.json").read_text(encoding="utf-8")
+    )
+    generated_text = "\n".join(
+        path.read_text(encoding="utf-8")
+        for directory in ("homework", "quizzes", "exams", "projects", "rubrics", "answer_keys")
+        for path in sorted((course_root / directory).glob("*.*"))
+    )
+
+    assert "Course Map, Core Vocabulary, and Success Criteria" in homework_text
+    assert "course scope for software engineering" in homework_text
+    assert any("Concept map" in question for question in homework_json["questions"])
+    assert "Problem space and learning map" in generated_text
+    for placeholder in (
+        "Complete a problem set",
+        "central idea from week",
+        "small example",
+        "Cumulative midterm exam",
+        "Strong answers",
+        "Submit the project artifact",
+    ):
+        assert placeholder not in generated_text

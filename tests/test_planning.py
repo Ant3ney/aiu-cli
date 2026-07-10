@@ -68,6 +68,26 @@ def test_course_plan_generates_blueprint_and_default_schedule(tmp_path: Path) ->
     assert blueprint["assessment_plan"]
     assert blueprint["source_usage_plan"]
     assert blueprint["lab_policy"] == "auto"
+    assessment_descriptions = [
+        assessment["description"] for assessment in blueprint["assessment_plan"]
+    ]
+    assert any(
+        assessment["assessment_id"] == "course_project"
+        for assessment in blueprint["assessment_plan"]
+    )
+    assert any(
+        "Course Map, Core Vocabulary, and Success Criteria" in description
+        for description in assessment_descriptions
+    )
+    assert not any(
+        placeholder in "\n".join(assessment_descriptions)
+        for placeholder in (
+            "Weekly homework for week",
+            "Short quiz for week",
+            "Cumulative midterm assessment",
+            "Cumulative final assessment",
+        )
+    )
     week_titles = [week["title"] for week in blueprint["week_plan"]]
     lecture_titles = [
         title for week in blueprint["week_plan"] for title in week["lecture_titles"]

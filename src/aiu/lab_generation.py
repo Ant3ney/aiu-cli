@@ -288,31 +288,57 @@ def _expected_artifacts(blueprint: CourseBlueprint) -> list[str]:
 
 
 def _lab_session(blueprint: CourseBlueprint, week: int) -> LabSession:
+    week_plan = _week_for_number(blueprint, week)
+    objective = blueprint.outcomes[(week - 1) % len(blueprint.outcomes)]
+    topics = _topic_phrase(week_plan.topics)
+    anchor = _anchor_phrase(week_plan)
     lab_id = f"lab_w{week:02d}"
     cue = VRHandoffCue(
         cue_id=f"cue_{lab_id}_setup",
         artifact_id=lab_id,
         timestamp_or_segment="setup",
         scene_type="lab_room",
-        professor_action="introduce the lab setup and expected deliverables",
-        visual_aid=f"Week {week} lab bench",
+        professor_action=f"introduce the {week_plan.title} practice task and deliverables",
+        visual_aid=f"Week {week}: {week_plan.title}",
         interaction_anchor=f"{lab_id}_setup_check",
     )
     return LabSession(
         lab_id=lab_id,
         week=week,
-        title=f"Week {week} Lab",
-        goals=[blueprint.outcomes[(week - 1) % len(blueprint.outcomes)]],
-        setup="Prepare the course workspace and review the approved blueprint context.",
-        steps=[
-            "Review the week objectives.",
-            "Complete a guided practice task.",
-            "Document observations and submit a short reflection.",
+        title=f"Week {week} Lab: {week_plan.title}",
+        goals=[
+            objective,
+            f"Practice {topics} using the week {week} lecture and source anchors.",
         ],
-        expected_outputs=["Completed lab notes", "A short explanation tied to course objectives"],
+        setup=(
+            f"Review the Week {week} lectures ({'; '.join(week_plan.lecture_titles)}) "
+            f"and keep {anchor} available as evidence while working."
+        ),
+        steps=[
+            f"Extract a decision checklist for {week_plan.title} from {topics}.",
+            (
+                f"Apply the checklist to a concrete {week_plan.title.lower()} case and "
+                "record each decision, assumption, and expected result."
+            ),
+            (
+                f"Use {anchor} to verify or challenge at least two decisions in the lab notes."
+            ),
+            (
+                "Write a short reflection naming one tradeoff, edge case, or follow-up "
+                f"question raised by {week_plan.title.lower()}."
+            ),
+        ],
+        expected_outputs=[
+            f"Decision checklist for {week_plan.title}",
+            "Worked case notes with assumptions and expected result",
+            "Evidence notes tied to the lecture/source anchors",
+            "Reflection on one tradeoff, edge case, or follow-up question",
+        ],
         safety_notes=["Use local files responsibly and do not include secrets in submissions."],
         rubric=(
-            "Complete the required steps, explain decisions clearly, and connect work to outcomes."
+            f"Evaluate the checklist and worked case for accuracy in {week_plan.title}; "
+            "evidence quality from the named anchors; clear decision reasoning; and a "
+            "specific reflection on limitations or next steps."
         ),
         vr_cues=[cue],
     )
@@ -345,30 +371,73 @@ def _lab_markdown(lab: LabSession, blueprint: CourseBlueprint) -> str:
 
 
 def _alternative_activity(blueprint: CourseBlueprint, week: int) -> dict[str, Any]:
+    week_plan = _week_for_number(blueprint, week)
+    objective = blueprint.outcomes[(week - 1) % len(blueprint.outcomes)]
+    topics = _topic_phrase(week_plan.topics)
+    anchor = _anchor_phrase(week_plan)
     activity_id = f"activity_w{week:02d}"
     rationale = blueprint.lab_policy_rationale or "Labs are disabled for this course."
     metadata = {
         "activity_id": activity_id,
+        "anchor": anchor,
+        "objective": objective,
         "rationale": rationale,
+        "title": week_plan.title,
+        "topics": week_plan.topics,
         "type": "seminar",
         "week": week,
-        "objectives": [blueprint.outcomes[(week - 1) % len(blueprint.outcomes)]],
+        "objectives": [objective],
     }
     markdown = (
         "\n".join(
             [
-                f"# Week {week} Seminar Activity",
+                f"# Week {week} Seminar Activity: {week_plan.title}",
                 "",
                 f"Activity ID: {activity_id}",
                 "",
                 f"Rationale: {rationale}",
                 "",
                 (
-                    "Students complete a discussion, case analysis, or workshop activity "
-                    "instead of a lab."
+                    f"This seminar activity is used instead of a lab and focuses on {topics}."
                 ),
+                "",
+                "## Activity",
+                (
+                    f"Use {anchor} to debate how {week_plan.title.lower()} supports "
+                    f"the objective: {objective}"
+                ),
+                "",
+                "## Deliverables",
+                f"- A claim about {week_plan.title} supported by lecture or source evidence.",
+                "- One counterargument or limitation.",
+                "- A short next-step recommendation for continued study or practice.",
             ]
         )
         + "\n"
     )
     return {"markdown": markdown, "metadata": metadata}
+
+
+def _week_for_number(blueprint: CourseBlueprint, week_number: int):
+    for week in blueprint.week_plan:
+        if week.week == week_number:
+            return week
+    raise LabGenerationError(f"No week plan found for week {week_number}.")
+
+
+def _topic_phrase(values: list[str], *, limit: int = 3) -> str:
+    selected = [content_snippet(value, max_chars=120) for value in values if value][:limit]
+    if not selected:
+        return "the stated course topics"
+    if len(selected) == 1:
+        return selected[0]
+    if len(selected) == 2:
+        return f"{selected[0]} and {selected[1]}"
+    return f"{', '.join(selected[:-1])}, and {selected[-1]}"
+
+
+def _anchor_phrase(week) -> str:
+    anchors = [content_snippet(anchor, max_chars=140) for anchor in week.source_focus[:2]]
+    if not anchors:
+        anchors = [content_snippet(title, max_chars=140) for title in week.lecture_titles[:2]]
+    return _topic_phrase(anchors, limit=2)
