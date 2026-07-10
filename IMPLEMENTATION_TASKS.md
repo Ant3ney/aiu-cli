@@ -658,6 +658,9 @@ Implementation plan:
 - Add cancellation handling for long-running generation.
 - Add clear exit codes for validation failure, auth failure, user cancellation,
   bad input, and provider errors.
+- Keep long-running CLI output readable across terminal sizes: group progress
+  by stage, wrap long artifact paths/details/previews, and preserve the full
+  event stream in `logs/aiu.log`.
 - Add CI workflow if this repo will be pushed to GitHub.
 - Update README with MVP workflows and troubleshooting.
 

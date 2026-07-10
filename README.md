@@ -25,8 +25,18 @@ Install prerequisites on Arch Linux:
 sudo pacman -S git python-pipx
 ```
 
+Install from a local checkout with `uv`:
+
 ```bash
-cd /path/to/ai_university_cli
+cd /path/to/aiu-cli
+uv tool install --force .
+aiu --version
+```
+
+Or install with `pipx`:
+
+```bash
+cd /path/to/aiu-cli
 python -m pip install --user pipx
 python -m pipx ensurepath
 pipx install .
@@ -36,7 +46,7 @@ aiu --version
 For an editable development install instead:
 
 ```bash
-cd /path/to/ai_university_cli
+cd /path/to/aiu-cli
 python -m venv .venv
 . .venv/bin/activate
 pip install -e ".[dev]"
@@ -65,7 +75,7 @@ aiu update --dry-run
 Use an explicit checkout when needed:
 
 ```bash
-aiu update --source-dir /path/to/ai_university_cli
+aiu update --source-dir /path/to/aiu-cli
 ```
 
 ## Authentication
@@ -126,6 +136,11 @@ aiu auth login --provider fake
 
 ## Generate a course
 
+`aiu course create ... --yes` is the one-command full generation path. It
+initializes the course, stores the prompt, ingests context, runs source
+research, plans, approves, generates syllabus/lectures/labs/assessments,
+writes `rails.json`, validates, and logs progress to `logs/aiu.log`.
+
 With Codex:
 
 ```bash
@@ -154,6 +169,19 @@ aiu course create "Teach me artificial intelligence" \
   --yes
 ```
 
+For large source-backed courses, prefer a prompt file and explicit context
+paths:
+
+```bash
+aiu course create --prompt ./what_to_learn.md \
+  --context ./context/pokemon-showdown \
+  --context ./context/pokefirered \
+  --provider codex \
+  --level Advanced \
+  --output ./courses/creature-rpg \
+  --yes
+```
+
 ## Preview and refine the syllabus before generating the full course
 
 Use `--generate-until syllabus` when you want to inspect the course plan before
@@ -175,6 +203,11 @@ aiu course create "Teach me data-driven creature collector RPG design" \
 ```bash
 less ./courses/rpg/syllabus/syllabus.md
 less ./courses/rpg/course_blueprint.md
+```
+
+If local context was supplied, also review the compact research packet:
+
+```bash
 less ./courses/rpg/context_research.md
 ```
 
@@ -184,7 +217,8 @@ blueprint or syllabus preview. It scans the extracted chunks, writes
 notes to ground the course plan, reading list, and later lecture prompts. With a
 real provider such as `codex` or `openai`, AIU also asks the provider to study
 compact source packets module by module and synthesize citation guidance for
-future course generation.
+future course generation. Context-backed weekly plans include `Source focus`
+entries so later lectures know which files and chunk IDs to teach from.
 
 3. If the plan is missing topics, add feedback. You can run this command more
 than once; each note is appended to `course_feedback.md`, then AIU regenerates
@@ -201,12 +235,12 @@ aiu course feedback ./courses/rpg \
 5. When the syllabus looks right, start full course generation:
 
 ```bash
-aiu course generate ./courses/rpg
+aiu course generate ./courses/rpg --yes
 ```
 
 `--generate-until syllabus` creates an approved blueprint snapshot so the next
-`aiu course generate <course-folder>` command can begin immediately. If you want
-an explicit approval command after review, run:
+`aiu course generate <course-folder> --yes` command can begin immediately. If
+you want an explicit approval command after review, run:
 
 ```bash
 aiu course approve ./courses/rpg
@@ -225,8 +259,8 @@ not a required name.
 Then validate and export:
 
 ```bash
-aiu course validate ./courses/ai
-aiu course export ./courses/ai --format markdown,json,vr
+aiu course validate ./courses/rpg
+aiu course export ./courses/rpg --format markdown,json,vr
 ```
 
 Full course generation also writes `rails.json` at the course root. This is a
@@ -245,8 +279,12 @@ For staged work:
 aiu course create "Teach me compilers" --output ./courses/compilers --init-only
 aiu course plan ./courses/compilers
 aiu course approve ./courses/compilers
+aiu course generate ./courses/compilers --stage syllabus
 aiu course generate ./courses/compilers --stage lectures
-aiu course resume ./courses/compilers --yes
+aiu course generate ./courses/compilers --stage labs
+aiu course generate ./courses/compilers --stage assessments
+aiu course generate ./courses/compilers --stage rails
+aiu course validate ./courses/compilers
 aiu course status ./courses/compilers
 ```
 
@@ -255,12 +293,10 @@ aiu course status ./courses/compilers
 directory layout and overwrites `course.yaml` and `manifest.json`; unrelated
 files are left in place.
 
-`aiu course create ... --yes` initializes the project, stores the prompt,
-ingests/extracts local context, plans, approves, generates
-syllabus/lectures/labs/assessments, validates, and writes logs to `logs/aiu.log`.
-Long-running create/generate commands also stream a loading view with stage
-progress, artifact paths, compact previews of newly generated course content,
-and periodic notes while the course package is being assembled.
+Long-running create/generate commands stream a responsive loading view. It groups
+events by stage, wraps long paths/details/previews to the terminal width, shows
+progress counts and bars when space allows, and keeps the complete event stream
+in `logs/aiu.log`.
 
 By default, each generated lecture targets two hours of professor speech. AIU
 enforces this as a minimum transcript length of 18,000 words per lecture
@@ -271,6 +307,10 @@ word count from that configured duration.
 ## Troubleshooting
 
 - Validation failures write `validation_report.json` and `warnings.md`.
+- `aiu course validate <course>` expects a finished course package. If status
+  still shows lectures, labs, or assessments as pending, run
+  `aiu course generate <course> --yes` or `aiu course resume <course> --yes`
+  before validating.
 - `aiu course status <course>` reads `.aiu/state.json` to show completed,
   pending, failed, and skipped stages.
 - If course creation was interrupted, run `aiu course resume <course> --yes`
@@ -285,6 +325,6 @@ word count from that configured duration.
 ## Tests
 
 ```bash
-ruff check .
-pytest
+uv run --extra dev ruff check .
+uv run --extra dev pytest
 ```

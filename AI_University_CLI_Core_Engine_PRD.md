@@ -72,6 +72,8 @@ The OpenAI/Codex provider path should support both subscription-based sign-in an
 
 - Make generation auditable through logs, citations, source manifests, progress state, cost/usage estimates, and validation reports.
 
+- Preserve compact source-research notes so fresh generation sessions can teach from large context repositories without rereading every raw source file.
+
 ### 4.2 Non-Goals for the CLI MVP
 
 - Real-time VR rendering, avatars, voice synthesis, animation, or graphics engine integration.
@@ -138,11 +140,13 @@ The OpenAI/Codex provider path should support both subscription-based sign-in an
 
 2. CLI inventories files, extracts text/metadata, indexes content, and creates a source manifest.
 
-3. CLI identifies core topics, prerequisites, source coverage, contradictions, and missing knowledge.
+3. CLI creates a compact research packet that identifies core topics, source modules, citable chunks, source coverage, contradictions, and missing knowledge.
 
 4. CLI produces a course plan grounded in the provided materials and optional external research.
 
 5. CLI generates artifacts with source citations back to the user material and research references.
+
+6. Later agents and resume/regeneration runs use the compact research packet rather than feeding full prior transcripts or full source directories forward.
 
 ### 7.3 Resume or Regenerate Part of a Course
 
@@ -188,6 +192,8 @@ Priority labels: P0 = required for CLI MVP, P1 = required soon after MVP, P2 = f
 
 | FR-013 | P0 | Source grounding | Engine shall cite provided source files and external research sources where used. | Generated artifacts include provenance metadata or inline references sufficient to trace claims to source material. |
 
+| FR-013a | P0 | Context research packet | Engine shall write compact source-research notes before planning or generation when context is supplied. | Course packages include context_research.md and source_index/context_research.json; weekly plans include source-focus entries when context is available. |
+
 | FR-014 | P0 | Validation | Engine shall validate completeness, schedule consistency, source coverage, missing artifacts, broken references, and assessment alignment. | aiu course validate returns pass/warn/fail with actionable issues. |
 
 | FR-015 | P0 | Resumability | Engine shall write checkpoints after each stage and artifact. | Interrupted generation can resume without restarting from the beginning. |
@@ -229,7 +235,8 @@ aiu course create "Teach me machine learning from first principles" \
   --lecture-hours 2 \
   --lab-policy auto \
   --level beginner \
-  --output ./courses/machine-learning
+  --output ./courses/machine-learning \
+  --yes
 
 # Create a course from a prompt plus a directory of materials
 aiu course create --prompt ./prompt.md \
@@ -237,7 +244,17 @@ aiu course create --prompt ./prompt.md \
   --context ./notes.zip \
   --context ./diagrams \
   --provider codex \
-  --output ./courses/custom-course
+  --output ./courses/custom-course \
+  --yes
+
+# Preview the syllabus before full generation
+aiu course create --prompt ./prompt.md \
+  --context ./materials \
+  --provider codex \
+  --output ./courses/custom-course \
+  --generate-until syllabus
+aiu course feedback ./courses/custom-course "Add more source-level architecture coverage."
+aiu course generate ./courses/custom-course --yes
 
 # Review, approve, generate, validate, and export
 aiu course plan ./courses/custom-course
@@ -250,6 +267,10 @@ aiu course export ./courses/custom-course --format markdown,json,vr
 # Regenerate a subset
 aiu course regenerate ./courses/custom-course --artifact lecture:w08:d01
 aiu course generate ./courses/custom-course --from week:10 --to week:12
+aiu course resume ./courses/custom-course --yes
+
+# Update the installed CLI
+aiu update
 ```
 
 ## 10. Core Generation Pipeline
@@ -260,21 +281,25 @@ aiu course generate ./courses/custom-course --from week:10 --to week:12
 
 | 1. Initialize project | Create local workspace, config, and manifest. | course.yaml, prompt.md, logs/, artifacts/ |
 
-| 2. Ingest sources | Inventory and extract files/directories/images/archives. | source_manifest.json, extracted_text/, image_descriptions/, ingest_report.json |
+| 2. Ingest sources | Inventory and extract files/directories/images/archives. | source_manifest.json, extracted_sources/, ingest_report.json |
 
 | 3. Index context | Chunk, embed or otherwise index sources for retrieval and citation. | source_index/, chunk_manifest.json |
 
-| 4. Analyze learning intent | Infer target level, prerequisites, scope, and learning outcomes. | intent_analysis.json |
+| 4. Research context | Build compact source-research notes and source-module guidance before planning. | context_research.md, source_index/context_research.json |
 
-| 5. Plan curriculum | Design a semester-length course structure. | course_blueprint.md/json, schedule.json |
+| 5. Analyze learning intent | Infer target level, prerequisites, scope, and learning outcomes. | intent_analysis.json |
 
-| 6. Optional approval | Let user review/edit plan before large generation. | approved_course_blueprint.json |
+| 6. Plan curriculum | Design a semester-length course structure grounded in prompt, feedback, and source research. | course_blueprint.md/json, schedule.json |
 
-| 7. Generate artifacts | Generate lectures, labs, homework, quizzes, exams, rubrics, projects, and study aids. | lectures/, labs/, homework/, quizzes/, exams/, rubrics/ |
+| 7. Optional approval | Let user review/edit plan before large generation. | approved_course_blueprint.json |
 
-| 8. Validate | Check completeness, consistency, grounding, and downstream readiness. | validation_report.json, warnings.md |
+| 8. Generate artifacts | Generate lectures, labs, homework, quizzes, exams, rubrics, projects, and study aids. | lectures/, labs/, homework/, quizzes/, exams/, rubrics/ |
 
-| 9. Package/export | Create human and machine-readable bundles. | exports/, vr_handoff/, course_package.json |
+| 9. Generate rails | Emit a deterministic runtime contract that catalogs artifacts and teaching actions. | rails.json |
+
+| 10. Validate | Check completeness, consistency, grounding, and downstream readiness. | validation_report.json, warnings.md |
+
+| 11. Package/export | Create human and machine-readable bundles. | exports/, vr_handoff/, course_package.json |
 
 
 
@@ -331,6 +356,8 @@ CLI Shell
 
 | Exporter | Package course outputs for human reading, downstream applications, and future VR import. |
 
+| Course Rails Generator | Build the deterministic runtime contract used by non-AI clients to load course content in order. |
+
 
 
 ## 12. Output Package Specification
@@ -344,6 +371,7 @@ course-root/
   prompt.md
   course_blueprint.md
   course_blueprint.json
+  context_research.md
   rails.json
   schedule.json
   source_manifest.json
@@ -351,6 +379,8 @@ course-root/
   validation_report.json
   logs/
   source_index/
+    context_research.json
+    chunk_manifest.json
   extracted_sources/
   syllabus/
     syllabus.md
@@ -391,6 +421,8 @@ course-root/
 
 | CourseBlueprint | Approved course plan and dependency anchor. | course_title, outcomes, prerequisites, modules, week_plan, assessment_plan, lab_policy |
 
+| ContextResearch | Compact source-memory packet for planning and generation. | summary, requirements, source_modules, key_sources, idea_chunks, ai_research |
+
 | LectureSession | One lecture transcript and metadata. | lecture_id, week, day, title, objectives, transcript, source_refs, estimated_duration, vr_cues |
 
 | LabSession | Lab transcript/instructions when applicable. | lab_id, week, goals, setup, steps, expected_outputs, safety_notes, rubric |
@@ -400,6 +432,8 @@ course-root/
 | VRHandoffCue | Future graphics/VR metadata. | cue_id, artifact_id, timestamp_or_segment, scene_type, professor_action, visual_aid, interaction_anchor |
 
 | ValidationReport | Quality and completeness report. | status, checks, warnings, failures, artifact_counts, citation_coverage, schema_errors |
+
+| CourseRails | Deterministic downstream runtime plan. | course_id, generated_at, artifacts, weeks, presentation_hooks, validation |
 
 
 
@@ -505,7 +539,7 @@ The VR handoff schema should be considered part of the CLI MVP because retrofitt
 
 | Reliability | Generation must be checkpointed and resumable. Failed artifacts should not corrupt completed artifacts. |
 
-| Performance | The engine should support long-running jobs with progress updates, streaming logs, and parallel generation where safe. |
+| Performance | The engine should support long-running jobs with responsive progress updates, streaming logs, and parallel generation where safe. |
 
 | Scalability | No arbitrary product-level zip or directory limit; practical limits should be governed by local disk, configured safety thresholds, and provider limits. |
 
@@ -517,7 +551,7 @@ The VR handoff schema should be considered part of the CLI MVP because retrofitt
 
 | Privacy | Secrets must not be written to course artifacts. Local source paths can be redacted in export mode. |
 
-| Observability | Logs should include stage status, artifact IDs, retries, provider usage where available, validation results, and warnings. |
+| Observability | Logs should include stage status, artifact IDs, retries, provider usage where available, validation results, and warnings. CLI progress output should remain readable across narrow and wide terminals by grouping stages and wrapping long details. |
 
 | Determinism | Artifact IDs, folder paths, and schema keys should remain stable across runs unless content is intentionally regenerated. |
 
